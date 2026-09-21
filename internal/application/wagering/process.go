@@ -56,14 +56,9 @@ func (s *Service) Process(
 	case domain.WagerKindBet,
 		domain.WagerKindWin,
 		domain.WagerKindLoss,
-		domain.WagerKindRefund:
+		domain.WagerKindRefund,
+		domain.WagerKindRollback:
 		// Supported below.
-
-	case domain.WagerKindRollback:
-		return ProcessResult{}, fmt.Errorf(
-			"wager kind %s not implemented yet",
-			cmd.Request.Kind,
-		)
 
 	default:
 		return ProcessResult{}, domain.ErrInvalidWagerKind
@@ -99,7 +94,7 @@ func (s *Service) Process(
 		_ = tx.Rollback(ctx)
 	}()
 
-	// Fast path for already processed idempotent requests.
+	// Fast idempotency path.
 	replay, found, err := findIdempotentReplay(
 		ctx,
 		tx,
@@ -122,7 +117,7 @@ func (s *Service) Process(
 		return replay, nil
 	}
 
-	// Serialize financial decisions per wallet.
+	// Serialize all financial decisions for this wallet.
 	wallet, err := lockWallet(
 		ctx,
 		tx,
@@ -132,8 +127,8 @@ func (s *Service) Process(
 		return ProcessResult{}, err
 	}
 
-	// The state may have changed while waiting for the wallet lock,
-	// so idempotency must be checked again.
+	// A concurrent request may have committed while this transaction
+	// was waiting for the wallet lock.
 	replay, found, err = findIdempotentReplay(
 		ctx,
 		tx,
@@ -179,8 +174,11 @@ func (s *Service) Process(
 	}
 
 	var reference *referencedTransaction
+	var reversalMovement movementDirection
 
-	if cmd.Request.Kind == domain.WagerKindRefund {
+	if cmd.Request.Kind == domain.WagerKindRefund ||
+		cmd.Request.Kind == domain.WagerKindRollback {
+
 		foundReference, found, err := findReferencedTransaction(
 			ctx,
 			tx,
@@ -192,8 +190,7 @@ func (s *Service) Process(
 
 		if !found {
 			// Temporary behavior.
-			// This will become PENDING_REFERENCE when the retry flow
-			// is implemented.
+			// This becomes PENDING_REFERENCE in the next stage.
 			return ProcessResult{}, errors.New(
 				"referenced transaction not found",
 			)
@@ -203,6 +200,14 @@ func (s *Service) Process(
 			cmd.Request,
 			foundReference,
 		); err != nil {
+			return ProcessResult{}, err
+		}
+
+		reversalMovement, err = reversalDirection(
+			cmd.Request.Kind,
+			foundReference,
+		)
+		if err != nil {
 			return ProcessResult{}, err
 		}
 
@@ -235,17 +240,42 @@ func (s *Service) Process(
 		}
 
 	case domain.WagerKindLoss:
-		// LOSS records the outcome but does not move money.
+		// LOSS has no financial movement.
 
-	case domain.WagerKindRefund:
-		if err := wallet.Credit(cmd.Request.Amount, now); err != nil {
-			return ProcessResult{}, err
+	case domain.WagerKindRefund,
+		domain.WagerKindRollback:
+
+		switch reversalMovement {
+		case movementCredit:
+			if err := wallet.Credit(cmd.Request.Amount, now); err != nil {
+				return ProcessResult{}, err
+			}
+
+		case movementDebit:
+			if err := wallet.Debit(cmd.Request.Amount, now); err != nil {
+				if errors.Is(err, domain.ErrInsufficientFunds) {
+					return persistRejectedTransaction(
+						ctx,
+						tx,
+						cmd,
+						payloadHash,
+						wallet,
+						"REVERSAL_INSUFFICIENT_FUNDS",
+					)
+				}
+
+				return ProcessResult{}, err
+			}
+
+		default:
+			return ProcessResult{}, ErrInvalidReferenceKind
 		}
 	}
 
 	transactionID := uuid.New()
 
 	var referencedTransactionID any
+
 	if reference != nil {
 		referencedTransactionID = reference.ID
 	}
@@ -305,8 +335,6 @@ func (s *Service) Process(
 		)
 	}
 
-	// LOSS has no financial movement, so it does not update the
-	// wallet and does not produce a ledger entry.
 	if cmd.Request.Kind != domain.WagerKindLoss {
 		_, err = tx.Exec(
 			ctx,
@@ -332,8 +360,14 @@ func (s *Service) Process(
 
 		direction := "CREDIT"
 
-		if cmd.Request.Kind == domain.WagerKindBet {
+		switch cmd.Request.Kind {
+		case domain.WagerKindBet:
 			direction = "DEBIT"
+
+		case domain.WagerKindRollback:
+			if reversalMovement == movementDebit {
+				direction = "DEBIT"
+			}
 		}
 
 		_, err = tx.Exec(
