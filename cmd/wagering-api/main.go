@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"fmt"
 	"os"
 
 	"github.com/Tharik/wagering-platform/internal/application/wagering"
@@ -27,6 +26,8 @@ const (
 
 	defaultCommandsQueueURL = "http://sqs.us-east-1.localhost.localstack.cloud:4566/000000000000/wager-commands.fifo"
 	defaultEventsQueueURL   = "http://sqs.us-east-1.localhost.localstack.cloud:4566/000000000000/wager-events.fifo"
+
+	defaultOIDCIssuer = "http://localhost:8081/realms/wagering"
 )
 
 type config struct {
@@ -35,6 +36,7 @@ type config struct {
 	SQSEndpoint      string
 	CommandsQueueURL string
 	EventsQueueURL   string
+	OIDCIssuer       string
 }
 
 func main() {
@@ -44,6 +46,7 @@ func main() {
 			newDatabase,
 			newPool,
 			newSQSClient,
+			newAuthMiddleware,
 
 			wagering.NewService,
 			wagering.NewMessageProcessor,
@@ -51,8 +54,8 @@ func main() {
 
 			httpapi.NewWalletHandler,
 			httpapi.NewWagerHandler,
-			httpapi.NewServer,
 			httpapi.NewHealthHandler,
+			httpapi.NewServer,
 
 			newSQSConsumer,
 			newSQSPublisher,
@@ -90,6 +93,10 @@ func loadConfig() config {
 			"SQS_EVENTS_QUEUE_URL",
 			defaultEventsQueueURL,
 		),
+		OIDCIssuer: envOrDefault(
+			"OIDC_ISSUER",
+			defaultOIDCIssuer,
+		),
 	}
 }
 
@@ -121,6 +128,15 @@ func newPool(
 	db *postgres.Database,
 ) *pgxpool.Pool {
 	return db.Pool
+}
+
+func newAuthMiddleware(
+	cfg config,
+) (*httpapi.AuthMiddleware, error) {
+	return httpapi.NewAuthMiddleware(
+		context.Background(),
+		cfg.OIDCIssuer,
+	)
 }
 
 func newSQSClient(
@@ -221,10 +237,10 @@ func registerLifecycle(
 			OnStop: func(ctx context.Context) error {
 				if cancel != nil {
 					cancel()
+				}
 
-					if err := httpServer.Shutdown(ctx); err != nil {
-						return err
-					}
+				if err := httpServer.Shutdown(ctx); err != nil {
+					return err
 				}
 
 				return nil
@@ -244,8 +260,4 @@ func envOrDefault(
 	}
 
 	return value
-}
-
-func init() {
-	_ = fmt.Sprintf
 }

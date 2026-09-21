@@ -24,7 +24,6 @@ func NewWagerHandler(
 
 type processWagerRequest struct {
 	IdempotencyKey                 string `json:"idempotencyKey"`
-	ProviderID                     string `json:"providerId"`
 	ExternalTransactionID          string `json:"externalTransactionId"`
 	PlayerID                       string `json:"playerId"`
 	WalletID                       string `json:"walletId"`
@@ -70,6 +69,18 @@ func (h *WagerHandler) Process(
 	w http.ResponseWriter,
 	r *http.Request,
 ) {
+	principal, ok := PrincipalFromContext(r.Context())
+	if !ok {
+		writeJSON(
+			w,
+			http.StatusUnauthorized,
+			map[string]string{
+				"error": "unauthorized",
+			},
+		)
+		return
+	}
+
 	var request processWagerRequest
 
 	decoder := json.NewDecoder(r.Body)
@@ -87,7 +98,6 @@ func (h *WagerHandler) Process(
 	}
 
 	if request.IdempotencyKey == "" ||
-		request.ProviderID == "" ||
 		request.ExternalTransactionID == "" ||
 		request.PlayerID == "" ||
 		request.WalletID == "" ||
@@ -138,7 +148,7 @@ func (h *WagerHandler) Process(
 	command := wagering.ProcessCommand{
 		IdempotencyKey: request.IdempotencyKey,
 		Request: domain.WagerRequest{
-			ProviderID:                     request.ProviderID,
+			ProviderID:                     principal.ClientID,
 			ExternalTransactionID:          request.ExternalTransactionID,
 			PlayerID:                       request.PlayerID,
 			WalletID:                       request.WalletID,
@@ -183,9 +193,22 @@ func (h *WagerHandler) Get(
 	w http.ResponseWriter,
 	r *http.Request,
 ) {
-	result, err := h.service.Get(
+	principal, ok := PrincipalFromContext(r.Context())
+	if !ok {
+		writeJSON(
+			w,
+			http.StatusUnauthorized,
+			map[string]string{
+				"error": "unauthorized",
+			},
+		)
+		return
+	}
+
+	result, err := h.service.GetForProvider(
 		r.Context(),
 		r.PathValue("id"),
+		principal.ClientID,
 	)
 	if err != nil {
 		if errors.Is(err, wagering.ErrWagerNotFound) {

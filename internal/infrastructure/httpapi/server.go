@@ -15,39 +15,67 @@ func NewServer(
 	walletHandler *WalletHandler,
 	wagerHandler *WagerHandler,
 	healthHandler *HealthHandler,
+	auth *AuthMiddleware,
 ) *Server {
 	mux := http.NewServeMux()
 
-	mux.HandleFunc(
+	// Internal wallet operations.
+	mux.Handle(
 		"POST /wallets",
-		walletHandler.Create,
+		auth.Authenticate(
+			auth.InternalOnly(
+				http.HandlerFunc(walletHandler.Create),
+			),
+		),
 	)
 
-	mux.HandleFunc(
+	mux.Handle(
 		"GET /wallets/{id}",
-		walletHandler.Get,
+		auth.Authenticate(
+			auth.InternalOnly(
+				http.HandlerFunc(walletHandler.Get),
+			),
+		),
 	)
 
-	mux.HandleFunc(
+	mux.Handle(
 		"GET /wallets/{id}/ledger",
-		walletHandler.Ledger,
+		auth.Authenticate(
+			auth.InternalOnly(
+				http.HandlerFunc(walletHandler.Ledger),
+			),
+		),
 	)
 
-	mux.HandleFunc(
+	mux.Handle(
 		"GET /wallets/{id}/reconciliation",
-		walletHandler.Reconcile,
+		auth.Authenticate(
+			auth.InternalOnly(
+				http.HandlerFunc(walletHandler.Reconcile),
+			),
+		),
 	)
 
-	mux.HandleFunc(
+	// Provider operations.
+	mux.Handle(
 		"POST /wagers",
-		wagerHandler.Process,
+		auth.Authenticate(
+			auth.ProviderOnly(
+				http.HandlerFunc(wagerHandler.Process),
+			),
+		),
 	)
 
-	mux.HandleFunc(
+	mux.Handle(
 		"GET /wagers/{id}",
-		wagerHandler.Get,
+		auth.Authenticate(
+			auth.ProviderOnly(
+				http.HandlerFunc(wagerHandler.Get),
+			),
+		),
 	)
 
+	// Health endpoints intentionally remain unauthenticated.
 	mux.HandleFunc(
 		"GET /health/live",
 		healthHandler.Live,

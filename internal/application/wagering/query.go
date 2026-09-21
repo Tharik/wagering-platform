@@ -32,14 +32,15 @@ type WagerResult struct {
 	UpdatedAt                      time.Time
 }
 
-func (s *Service) Get(
+func (s *Service) GetForProvider(
 	ctx context.Context,
 	transactionID string,
+	providerID string,
 ) (WagerResult, error) {
 	var result WagerResult
 
 	var (
-		providerID                     *string
+		storedProviderID               *string
 		externalTransactionID          *string
 		idempotencyKey                 *string
 		roundID                        *string
@@ -73,11 +74,13 @@ func (s *Service) Get(
 			updated_at
 		FROM wager_transactions
 		WHERE id = $1
+		  AND provider_id = $2
 		`,
 		transactionID,
+		providerID,
 	).Scan(
 		&result.TransactionID,
-		&providerID,
+		&storedProviderID,
 		&externalTransactionID,
 		&idempotencyKey,
 		&result.WalletID,
@@ -107,7 +110,7 @@ func (s *Service) Get(
 		)
 	}
 
-	result.ProviderID = stringValue(providerID)
+	result.ProviderID = stringValue(storedProviderID)
 	result.ExternalTransactionID = stringValue(externalTransactionID)
 	result.IdempotencyKey = stringValue(idempotencyKey)
 	result.RoundID = stringValue(roundID)
