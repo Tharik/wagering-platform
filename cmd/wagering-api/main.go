@@ -48,8 +48,11 @@ func main() {
 			wagering.NewService,
 			wagering.NewMessageProcessor,
 			wallet.NewService,
+
 			httpapi.NewWalletHandler,
+			httpapi.NewWagerHandler,
 			httpapi.NewServer,
+
 			newSQSConsumer,
 			newSQSPublisher,
 			newOutboxPublisher,
@@ -217,6 +220,7 @@ func registerLifecycle(
 			OnStop: func(ctx context.Context) error {
 				if cancel != nil {
 					cancel()
+
 					if err := httpServer.Shutdown(ctx); err != nil {
 						return err
 					}

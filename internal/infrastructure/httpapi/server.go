@@ -13,6 +13,7 @@ type Server struct {
 
 func NewServer(
 	walletHandler *WalletHandler,
+	wagerHandler *WagerHandler,
 ) *Server {
 	mux := http.NewServeMux()
 
@@ -29,6 +30,11 @@ func NewServer(
 	mux.HandleFunc(
 		"GET /wallets/{id}/ledger",
 		walletHandler.Ledger,
+	)
+
+	mux.HandleFunc(
+		"POST /wagers",
+		wagerHandler.Process,
 	)
 
 	return &Server{
