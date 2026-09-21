@@ -1294,6 +1294,371 @@ func TestRefundRestoresBetAmountAndReferencesOriginalBet(t *testing.T) {
 	}
 }
 
+func TestConcurrentSameIdempotencyKeyAcrossDifferentWallets(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+
+	pool, err := pgxpool.New(
+		ctx,
+		"postgres://wagering:wagering@localhost:5432/wagering?sslmode=disable",
+	)
+	if err != nil {
+		t.Fatalf("connect postgres: %v", err)
+	}
+	defer pool.Close()
+
+	cleanDatabase(t, ctx, pool)
+
+	walletService := wallet.NewService(pool)
+
+	walletA, err := walletService.Create(
+		ctx,
+		wallet.CreateWalletCommand{
+			PlayerID:       "player-race-a",
+			InitialBalance: domain.NewMoney(10000, domain.BRL),
+		},
+	)
+	if err != nil {
+		t.Fatalf("create wallet A: %v", err)
+	}
+
+	walletB, err := walletService.Create(
+		ctx,
+		wallet.CreateWalletCommand{
+			PlayerID:       "player-race-b",
+			InitialBalance: domain.NewMoney(10000, domain.BRL),
+		},
+	)
+	if err != nil {
+		t.Fatalf("create wallet B: %v", err)
+	}
+
+	service := NewService(pool)
+
+	commands := []ProcessCommand{
+		{
+			IdempotencyKey: "same-idempotency-key",
+			Request: domain.WagerRequest{
+				ProviderID:            "provider-race",
+				ExternalTransactionID: "external-race-a",
+				PlayerID:              "player-race-a",
+				WalletID:              walletA.WalletID,
+				RoundID:               "round-race",
+				GameID:                "game-race",
+				Kind:                  domain.WagerKindBet,
+				Amount:                domain.NewMoney(1000, domain.BRL),
+			},
+		},
+		{
+			IdempotencyKey: "same-idempotency-key",
+			Request: domain.WagerRequest{
+				ProviderID:            "provider-race",
+				ExternalTransactionID: "external-race-b",
+				PlayerID:              "player-race-b",
+				WalletID:              walletB.WalletID,
+				RoundID:               "round-race",
+				GameID:                "game-race",
+				Kind:                  domain.WagerKindBet,
+				Amount:                domain.NewMoney(1000, domain.BRL),
+			},
+		},
+	}
+
+	type outcome struct {
+		result ProcessResult
+		err    error
+	}
+
+	start := make(chan struct{})
+	outcomes := make(chan outcome, len(commands))
+
+	var wg sync.WaitGroup
+
+	for _, command := range commands {
+		wg.Add(1)
+
+		go func(cmd ProcessCommand) {
+			defer wg.Done()
+
+			<-start
+
+			result, err := service.Process(ctx, cmd)
+
+			outcomes <- outcome{
+				result: result,
+				err:    err,
+			}
+		}(command)
+	}
+
+	close(start)
+
+	wg.Wait()
+	close(outcomes)
+
+	processed := 0
+	conflicts := 0
+
+	for outcome := range outcomes {
+		switch {
+		case outcome.err == nil:
+			if outcome.result.State != domain.WagerStateProcessed {
+				t.Fatalf(
+					"expected successful request to be PROCESSED, got %s",
+					outcome.result.State,
+				)
+			}
+
+			processed++
+
+		case errors.Is(outcome.err, ErrIdempotencyConflict):
+			conflicts++
+
+		default:
+			t.Fatalf("unexpected processing error: %v", outcome.err)
+		}
+	}
+
+	if processed != 1 {
+		t.Fatalf("expected exactly 1 processed request, got %d", processed)
+	}
+
+	if conflicts != 1 {
+		t.Fatalf("expected exactly 1 idempotency conflict, got %d", conflicts)
+	}
+
+	var transactionCount int
+
+	err = pool.QueryRow(
+		ctx,
+		`
+		SELECT COUNT(*)
+		FROM wager_transactions
+		WHERE provider_id = 'provider-race'
+		  AND idempotency_key = 'same-idempotency-key'
+		`,
+	).Scan(&transactionCount)
+	if err != nil {
+		t.Fatalf("count wager transactions: %v", err)
+	}
+
+	if transactionCount != 1 {
+		t.Fatalf("expected exactly 1 persisted transaction, got %d", transactionCount)
+	}
+
+	var balanceA int64
+	var balanceB int64
+
+	err = pool.QueryRow(
+		ctx,
+		`SELECT balance FROM wallets WHERE id = $1`,
+		walletA.WalletID,
+	).Scan(&balanceA)
+	if err != nil {
+		t.Fatalf("read wallet A: %v", err)
+	}
+
+	err = pool.QueryRow(
+		ctx,
+		`SELECT balance FROM wallets WHERE id = $1`,
+		walletB.WalletID,
+	).Scan(&balanceB)
+	if err != nil {
+		t.Fatalf("read wallet B: %v", err)
+	}
+
+	if !((balanceA == 9000 && balanceB == 10000) ||
+		(balanceA == 10000 && balanceB == 9000)) {
+		t.Fatalf(
+			"expected exactly one wallet to be debited; got walletA=%d walletB=%d",
+			balanceA,
+			balanceB,
+		)
+	}
+}
+
+func TestConcurrentSameExternalTransactionAcrossDifferentWallets(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+
+	pool, err := pgxpool.New(
+		ctx,
+		"postgres://wagering:wagering@localhost:5432/wagering?sslmode=disable",
+	)
+	if err != nil {
+		t.Fatalf("connect postgres: %v", err)
+	}
+	defer pool.Close()
+
+	cleanDatabase(t, ctx, pool)
+
+	walletService := wallet.NewService(pool)
+
+	walletA, err := walletService.Create(
+		ctx,
+		wallet.CreateWalletCommand{
+			PlayerID:       "player-external-race-a",
+			InitialBalance: domain.NewMoney(10000, domain.BRL),
+		},
+	)
+	if err != nil {
+		t.Fatalf("create wallet A: %v", err)
+	}
+
+	walletB, err := walletService.Create(
+		ctx,
+		wallet.CreateWalletCommand{
+			PlayerID:       "player-external-race-b",
+			InitialBalance: domain.NewMoney(10000, domain.BRL),
+		},
+	)
+	if err != nil {
+		t.Fatalf("create wallet B: %v", err)
+	}
+
+	service := NewService(pool)
+
+	commands := []ProcessCommand{
+		{
+			IdempotencyKey: "external-race-idem-a",
+			Request: domain.WagerRequest{
+				ProviderID:            "provider-external-race",
+				ExternalTransactionID: "same-external-transaction",
+				PlayerID:              "player-external-race-a",
+				WalletID:              walletA.WalletID,
+				RoundID:               "round-external-race",
+				GameID:                "game-external-race",
+				Kind:                  domain.WagerKindBet,
+				Amount:                domain.NewMoney(1000, domain.BRL),
+			},
+		},
+		{
+			IdempotencyKey: "external-race-idem-b",
+			Request: domain.WagerRequest{
+				ProviderID:            "provider-external-race",
+				ExternalTransactionID: "same-external-transaction",
+				PlayerID:              "player-external-race-b",
+				WalletID:              walletB.WalletID,
+				RoundID:               "round-external-race",
+				GameID:                "game-external-race",
+				Kind:                  domain.WagerKindBet,
+				Amount:                domain.NewMoney(1000, domain.BRL),
+			},
+		},
+	}
+
+	type outcome struct {
+		result ProcessResult
+		err    error
+	}
+
+	start := make(chan struct{})
+	outcomes := make(chan outcome, len(commands))
+
+	var wg sync.WaitGroup
+
+	for _, command := range commands {
+		wg.Add(1)
+
+		go func(cmd ProcessCommand) {
+			defer wg.Done()
+
+			<-start
+
+			result, err := service.Process(ctx, cmd)
+
+			outcomes <- outcome{
+				result: result,
+				err:    err,
+			}
+		}(command)
+	}
+
+	close(start)
+
+	wg.Wait()
+	close(outcomes)
+
+	processed := 0
+	duplicates := 0
+
+	for outcome := range outcomes {
+		switch {
+		case outcome.err == nil:
+			if outcome.result.State != domain.WagerStateProcessed {
+				t.Fatalf(
+					"expected successful request to be PROCESSED, got %s",
+					outcome.result.State,
+				)
+			}
+			processed++
+
+		case errors.Is(outcome.err, ErrExternalTransactionExists):
+			duplicates++
+
+		default:
+			t.Fatalf("unexpected processing error: %v", outcome.err)
+		}
+	}
+
+	if processed != 1 {
+		t.Fatalf("expected exactly 1 processed request, got %d", processed)
+	}
+
+	if duplicates != 1 {
+		t.Fatalf("expected exactly 1 external transaction conflict, got %d", duplicates)
+	}
+
+	var transactionCount int
+
+	err = pool.QueryRow(
+		ctx,
+		`
+		SELECT COUNT(*)
+		FROM wager_transactions
+		WHERE provider_id = 'provider-external-race'
+		  AND external_transaction_id = 'same-external-transaction'
+		`,
+	).Scan(&transactionCount)
+	if err != nil {
+		t.Fatalf("count wager transactions: %v", err)
+	}
+
+	if transactionCount != 1 {
+		t.Fatalf("expected exactly 1 persisted transaction, got %d", transactionCount)
+	}
+
+	var balanceA int64
+	var balanceB int64
+
+	err = pool.QueryRow(
+		ctx,
+		`SELECT balance FROM wallets WHERE id = $1`,
+		walletA.WalletID,
+	).Scan(&balanceA)
+	if err != nil {
+		t.Fatalf("read wallet A: %v", err)
+	}
+
+	err = pool.QueryRow(
+		ctx,
+		`SELECT balance FROM wallets WHERE id = $1`,
+		walletB.WalletID,
+	).Scan(&balanceB)
+	if err != nil {
+		t.Fatalf("read wallet B: %v", err)
+	}
+
+	if !((balanceA == 9000 && balanceB == 10000) ||
+		(balanceA == 10000 && balanceB == 9000)) {
+		t.Fatalf(
+			"expected exactly one wallet to be debited; got walletA=%d walletB=%d",
+			balanceA,
+			balanceB,
+		)
+	}
+}
+
 func cleanDatabase(
 	t *testing.T,
 	ctx context.Context,
