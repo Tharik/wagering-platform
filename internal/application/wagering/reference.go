@@ -14,6 +14,7 @@ var (
 	ErrReferenceMismatch       = errors.New("referenced transaction does not match reversal")
 	ErrInvalidReferenceKind    = errors.New("invalid referenced transaction kind")
 	ErrReferenceAmountMismatch = errors.New("reversal amount must match referenced transaction")
+	ErrAlreadyReversed         = errors.New("referenced transaction has already been reversed")
 )
 
 type referencedTransaction struct {
@@ -147,4 +148,34 @@ func validateReference(
 	}
 
 	return nil
+}
+
+func referenceAlreadyReversed(
+	ctx context.Context,
+	tx pgx.Tx,
+	referenceID uuid.UUID,
+) (bool, error) {
+	var exists bool
+
+	err := tx.QueryRow(
+		ctx,
+		`
+		SELECT EXISTS (
+			SELECT 1
+			FROM wager_transactions
+			WHERE referenced_transaction_id = $1
+			  AND state = 'PROCESSED'
+			  AND kind IN ('REFUND', 'ROLLBACK')
+		)
+		`,
+		referenceID,
+	).Scan(&exists)
+	if err != nil {
+		return false, fmt.Errorf(
+			"check existing reversal: %w",
+			err,
+		)
+	}
+
+	return exists, nil
 }

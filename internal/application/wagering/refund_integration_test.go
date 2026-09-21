@@ -371,14 +371,27 @@ func TestSecondRefundOfSameBetIsRejected(t *testing.T) {
 		},
 	}
 
-	_, err = service.Process(ctx, secondRefund)
-
-	if err == nil {
-		t.Fatal("expected second REFUND of same BET to fail")
+	secondResult, err := service.Process(ctx, secondRefund)
+	if err != nil {
+		t.Fatalf("process second REFUND: %v", err)
 	}
 
-	// The failed INSERT must roll back the entire PostgreSQL transaction.
-	// Therefore the wallet cannot receive a second credit.
+	if secondResult.State != domain.WagerStateRejected {
+		t.Fatalf(
+			"expected second REFUND REJECTED, got %s",
+			secondResult.State,
+		)
+	}
+
+	if secondResult.FailureCode != "ALREADY_REVERSED" {
+		t.Fatalf(
+			"expected ALREADY_REVERSED, got %s",
+			secondResult.FailureCode,
+		)
+	}
+
+	// The second REFUND is a business rejection.
+	// It must not change the wallet balance or create another ledger movement.
 	var balance int64
 	var version int64
 

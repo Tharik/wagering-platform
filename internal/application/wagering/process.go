@@ -206,6 +206,26 @@ func (s *Service) Process(
 			return ProcessResult{}, err
 		}
 
+		alreadyReversed, err := referenceAlreadyReversed(
+			ctx,
+			tx,
+			foundReference.ID,
+		)
+		if err != nil {
+			return ProcessResult{}, err
+		}
+
+		if alreadyReversed {
+			return persistRejectedTransaction(
+				ctx,
+				tx,
+				cmd,
+				payloadHash,
+				wallet,
+				"ALREADY_REVERSED",
+			)
+		}
+
 		reversalMovement, err = reversalDirection(
 			cmd.Request.Kind,
 			foundReference,

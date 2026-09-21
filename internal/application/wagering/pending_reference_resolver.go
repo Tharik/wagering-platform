@@ -151,6 +151,37 @@ func (r *PendingReferenceResolver) ResolveOne(
 		return true, nil
 	}
 
+	alreadyReversed, err := referenceAlreadyReversed(
+		ctx,
+		tx,
+		reference.ID,
+	)
+	if err != nil {
+		return false, err
+	}
+
+	if alreadyReversed {
+		if err := rejectPendingReference(
+			ctx,
+			tx,
+			pending,
+			wallet,
+			"ALREADY_REVERSED",
+			now,
+		); err != nil {
+			return false, err
+		}
+
+		if err := tx.Commit(ctx); err != nil {
+			return false, fmt.Errorf(
+				"commit already reversed pending reference: %w",
+				err,
+			)
+		}
+
+		return true, nil
+	}
+
 	direction, err := reversalDirection(
 		pending.Request.Kind,
 		reference,
