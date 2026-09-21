@@ -42,6 +42,11 @@ func NewServer(
 		wagerHandler.Get,
 	)
 
+	mux.HandleFunc(
+		"GET /wallets/{id}/reconciliation",
+		walletHandler.Reconcile,
+	)
+
 	return &Server{
 		server: &http.Server{
 			Addr:    ":8080",

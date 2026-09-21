@@ -52,6 +52,15 @@ type ledgerEntryResponse struct {
 	CreatedAt     string `json:"createdAt"`
 }
 
+type reconciliationResponse struct {
+	WalletID      string `json:"walletId"`
+	Currency      string `json:"currency"`
+	WalletBalance string `json:"walletBalance"`
+	LedgerBalance string `json:"ledgerBalance"`
+	EntryCount    int    `json:"entryCount"`
+	Consistent    bool   `json:"consistent"`
+}
+
 func (h *WalletHandler) Create(
 	w http.ResponseWriter,
 	r *http.Request,
@@ -257,6 +266,59 @@ func (h *WalletHandler) Ledger(
 		w,
 		http.StatusOK,
 		response,
+	)
+}
+
+func (h *WalletHandler) Reconcile(
+	w http.ResponseWriter,
+	r *http.Request,
+) {
+	result, err := h.service.Reconcile(
+		r.Context(),
+		r.PathValue("id"),
+	)
+
+	if errors.Is(err, wallet.ErrWalletNotFound) {
+		writeJSON(
+			w,
+			http.StatusNotFound,
+			map[string]string{
+				"error": "wallet not found",
+			},
+		)
+		return
+	}
+
+	if err != nil {
+		writeJSON(
+			w,
+			http.StatusInternalServerError,
+			map[string]string{
+				"error": "failed to reconcile wallet",
+			},
+		)
+		return
+	}
+
+	currency := domain.Currency(result.Currency)
+
+	writeJSON(
+		w,
+		http.StatusOK,
+		reconciliationResponse{
+			WalletID: result.WalletID,
+			Currency: result.Currency,
+			WalletBalance: domain.NewMoney(
+				result.WalletBalance,
+				currency,
+			).String(),
+			LedgerBalance: domain.NewMoney(
+				result.LedgerBalance,
+				currency,
+			).String(),
+			EntryCount: result.EntryCount,
+			Consistent: result.Consistent,
+		},
 	)
 }
 
