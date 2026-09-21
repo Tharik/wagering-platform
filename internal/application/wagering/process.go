@@ -55,11 +55,11 @@ func (s *Service) Process(
 	switch cmd.Request.Kind {
 	case domain.WagerKindBet,
 		domain.WagerKindWin,
-		domain.WagerKindLoss:
-		// Supported here.
+		domain.WagerKindLoss,
+		domain.WagerKindRefund:
+		// Supported below.
 
-	case domain.WagerKindRefund,
-		domain.WagerKindRollback:
+	case domain.WagerKindRollback:
 		return ProcessResult{}, fmt.Errorf(
 			"wager kind %s not implemented yet",
 			cmd.Request.Kind,
@@ -99,9 +99,7 @@ func (s *Service) Process(
 		_ = tx.Rollback(ctx)
 	}()
 
-	// Fast path:
-	// if this idempotency key has already been processed,
-	// return the persisted original result without locking the wallet.
+	// Fast path for already processed idempotent requests.
 	replay, found, err := findIdempotentReplay(
 		ctx,
 		tx,
@@ -125,9 +123,6 @@ func (s *Service) Process(
 	}
 
 	// Serialize financial decisions per wallet.
-	//
-	// This is a PostgreSQL row-level lock, so it works across
-	// different application processes and instances.
 	wallet, err := lockWallet(
 		ctx,
 		tx,
@@ -137,10 +132,8 @@ func (s *Service) Process(
 		return ProcessResult{}, err
 	}
 
-	// Another request may have committed while this transaction
-	// was waiting for the wallet row lock.
-	//
-	// Therefore we must re-check idempotency after acquiring it.
+	// The state may have changed while waiting for the wallet lock,
+	// so idempotency must be checked again.
 	replay, found, err = findIdempotentReplay(
 		ctx,
 		tx,
@@ -163,11 +156,6 @@ func (s *Service) Process(
 		return replay, nil
 	}
 
-	// At this point we know this idempotency key does not exist.
-	//
-	// If the provider/externalTransactionId already exists,
-	// somebody is trying to reuse the same external transaction
-	// with a different idempotency identity.
 	exists, err := externalTransactionExists(
 		ctx,
 		tx,
@@ -188,6 +176,37 @@ func (s *Service) Process(
 
 	if wallet.Balance.Currency() != cmd.Request.Amount.Currency() {
 		return ProcessResult{}, domain.ErrCurrencyMismatch
+	}
+
+	var reference *referencedTransaction
+
+	if cmd.Request.Kind == domain.WagerKindRefund {
+		foundReference, found, err := findReferencedTransaction(
+			ctx,
+			tx,
+			cmd.Request,
+		)
+		if err != nil {
+			return ProcessResult{}, err
+		}
+
+		if !found {
+			// Temporary behavior.
+			// This will become PENDING_REFERENCE when the retry flow
+			// is implemented.
+			return ProcessResult{}, errors.New(
+				"referenced transaction not found",
+			)
+		}
+
+		if err := validateReference(
+			cmd.Request,
+			foundReference,
+		); err != nil {
+			return ProcessResult{}, err
+		}
+
+		reference = &foundReference
 	}
 
 	balanceBefore := wallet.Balance
@@ -216,16 +235,20 @@ func (s *Service) Process(
 		}
 
 	case domain.WagerKindLoss:
-		// LOSS represents the outcome of an already placed wager.
-		// No additional balance movement occurs.
-		//
-		// Therefore:
-		// - no wallet balance change
-		// - no wallet version increment
-		// - no ledger entry
+		// LOSS records the outcome but does not move money.
+
+	case domain.WagerKindRefund:
+		if err := wallet.Credit(cmd.Request.Amount, now); err != nil {
+			return ProcessResult{}, err
+		}
 	}
 
 	transactionID := uuid.New()
+
+	var referencedTransactionID any
+	if reference != nil {
+		referencedTransactionID = reference.ID
+	}
 
 	_, err = tx.Exec(
 		ctx,
@@ -244,6 +267,8 @@ func (s *Service) Process(
 			state,
 			amount,
 			currency,
+			reference_external_transaction_id,
+			referenced_transaction_id,
 			result_balance,
 			created_at,
 			updated_at
@@ -252,8 +277,8 @@ func (s *Service) Process(
 			$1, $2, $3, $4, $5,
 			$6, $7, $8, $9,
 			$10, 'PROCESSED',
-			$11, $12, $13,
-			$14, $14
+			$11, $12, $13, $14,
+			$15, $16, $16
 		)
 		`,
 		transactionID,
@@ -268,6 +293,8 @@ func (s *Service) Process(
 		string(cmd.Request.Kind),
 		cmd.Request.Amount.Amount(),
 		string(cmd.Request.Amount.Currency()),
+		cmd.Request.ReferenceExternalTransactionID,
+		referencedTransactionID,
 		wallet.Balance.Amount(),
 		now,
 	)
@@ -278,6 +305,8 @@ func (s *Service) Process(
 		)
 	}
 
+	// LOSS has no financial movement, so it does not update the
+	// wallet and does not produce a ledger entry.
 	if cmd.Request.Kind != domain.WagerKindLoss {
 		_, err = tx.Exec(
 			ctx,
