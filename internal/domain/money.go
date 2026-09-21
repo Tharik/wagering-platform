@@ -160,7 +160,18 @@ func (m Money) Compare(other Money) (int, error) {
 }
 
 func (m Money) String() string {
-	return fmt.Sprintf("%d.%02d", m.amount/100, m.amount%100)
+	if m.amount >= 0 {
+		return fmt.Sprintf("%d.%02d", m.amount/100, m.amount%100)
+	}
+
+	whole := m.amount / 100
+	fraction := -(m.amount % 100)
+
+	if whole == 0 {
+		return fmt.Sprintf("-0.%02d", fraction)
+	}
+
+	return fmt.Sprintf("%d.%02d", whole, fraction)
 }
 
 func allDigits(value string) bool {

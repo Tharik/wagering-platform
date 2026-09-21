@@ -116,3 +116,33 @@ func TestMoneyCompare(t *testing.T) {
 		t.Fatalf("expected 1, got %d", result)
 	}
 }
+
+func TestMoneyString(t *testing.T) {
+	tests := []struct {
+		name     string
+		amount   int64
+		expected string
+	}{
+		{"positive amount", 1234, "12.34"},
+		{"positive cents", 50, "0.50"},
+		{"zero", 0, "0.00"},
+		{"negative amount", -1234, "-12.34"},
+		{"negative cents", -50, "-0.50"},
+		{"negative one cent", -1, "-0.01"},
+		{"minimum int64", -9223372036854775808, "-92233720368547758.08"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			money := NewMoney(tt.amount, BRL)
+
+			if got := money.String(); got != tt.expected {
+				t.Fatalf(
+					"expected %q, got %q",
+					tt.expected,
+					got,
+				)
+			}
+		})
+	}
+}
