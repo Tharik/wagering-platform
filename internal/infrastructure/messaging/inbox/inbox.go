@@ -37,6 +37,48 @@ func Register(
 ) (alreadyCompleted bool, err error) {
 	hash := PayloadHash(payload)
 
+	// Try to register the message first.
+	//
+	// ON CONFLICT DO NOTHING is important here. A SELECT ... FOR UPDATE
+	// cannot lock a row that does not exist yet, so two concurrent first
+	// deliveries could otherwise both observe "no row" and race on INSERT.
+	//
+	// PostgreSQL's unique constraint on (consumer_name, message_id)
+	// serializes that race for us.
+	result, err := tx.Exec(
+		ctx,
+		`
+		INSERT INTO inbox_messages (
+			consumer_name,
+			message_id,
+			payload_hash,
+			received_at
+		)
+		VALUES ($1, $2, $3, NOW())
+		ON CONFLICT (consumer_name, message_id)
+		DO NOTHING
+		`,
+		consumerName,
+		messageID,
+		hash,
+	)
+	if err != nil {
+		return false, fmt.Errorf(
+			"register inbox message: %w",
+			err,
+		)
+	}
+
+	if result.RowsAffected() == 1 {
+		// This transaction registered the message for the first time.
+		return false, nil
+	}
+
+	// Another transaction already owns or committed this message ID.
+	//
+	// PostgreSQL waits for the conflicting INSERT transaction to resolve
+	// before ON CONFLICT DO NOTHING returns, so at this point we can read
+	// the existing row and verify that this really is the same message.
 	var existingHash string
 	var completedAt *time.Time
 
@@ -57,45 +99,18 @@ func Register(
 		&existingHash,
 		&completedAt,
 	)
-
-	switch {
-	case err == nil:
-		if existingHash != hash {
-			return false, ErrPayloadConflict
-		}
-
-		return completedAt != nil, nil
-
-	case !errors.Is(err, pgx.ErrNoRows):
-		return false, fmt.Errorf(
-			"query inbox message: %w",
-			err,
-		)
-	}
-
-	_, err = tx.Exec(
-		ctx,
-		`
-		INSERT INTO inbox_messages (
-			consumer_name,
-			message_id,
-			payload_hash,
-			received_at
-		)
-		VALUES ($1, $2, $3, NOW())
-		`,
-		consumerName,
-		messageID,
-		hash,
-	)
 	if err != nil {
 		return false, fmt.Errorf(
-			"register inbox message: %w",
+			"query existing inbox message: %w",
 			err,
 		)
 	}
 
-	return false, nil
+	if existingHash != hash {
+		return false, ErrPayloadConflict
+	}
+
+	return completedAt != nil, nil
 }
 
 func Complete(

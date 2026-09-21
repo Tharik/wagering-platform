@@ -3,6 +3,7 @@ package inbox
 import (
 	"context"
 	"errors"
+	"sync"
 	"testing"
 	"time"
 
@@ -338,6 +339,268 @@ func TestConcurrentRegisterSameMessageIsHandledAsReplay(t *testing.T) {
 	if count != 1 {
 		t.Fatalf(
 			"expected exactly 1 inbox message, got %d",
+			count,
+		)
+	}
+}
+
+func TestConcurrentRegisterSameMessageDoesNotFail(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+
+	pool, err := pgxpool.New(
+		ctx,
+		"postgres://wagering:wagering@localhost:5432/wagering?sslmode=disable",
+	)
+	if err != nil {
+		t.Fatalf("connect postgres: %v", err)
+	}
+	defer pool.Close()
+
+	_, err = pool.Exec(
+		ctx,
+		`
+		TRUNCATE TABLE
+			inbox_messages
+		CASCADE
+		`,
+	)
+	if err != nil {
+		t.Fatalf("clean inbox: %v", err)
+	}
+
+	const (
+		consumerName = "concurrent-consumer"
+		messageID    = "concurrent-message-001"
+	)
+
+	payload := []byte(`{"type":"BET","amount":"10.00"}`)
+
+	type outcome struct {
+		alreadyCompleted bool
+		err              error
+	}
+
+	start := make(chan struct{})
+	outcomes := make(chan outcome, 2)
+
+	var wg sync.WaitGroup
+
+	for i := 0; i < 2; i++ {
+		wg.Add(1)
+
+		go func() {
+			defer wg.Done()
+
+			tx, err := pool.Begin(ctx)
+			if err != nil {
+				outcomes <- outcome{err: err}
+				return
+			}
+			defer tx.Rollback(ctx)
+
+			<-start
+
+			alreadyCompleted, err := Register(
+				ctx,
+				tx,
+				consumerName,
+				messageID,
+				payload,
+			)
+			if err != nil {
+				outcomes <- outcome{err: err}
+				return
+			}
+
+			if err := tx.Commit(ctx); err != nil {
+				outcomes <- outcome{err: err}
+				return
+			}
+
+			outcomes <- outcome{
+				alreadyCompleted: alreadyCompleted,
+			}
+		}()
+	}
+
+	close(start)
+
+	wg.Wait()
+	close(outcomes)
+
+	successes := 0
+
+	for result := range outcomes {
+		if result.err != nil {
+			t.Fatalf("concurrent Register failed: %v", result.err)
+		}
+
+		successes++
+	}
+
+	if successes != 2 {
+		t.Fatalf("expected 2 successful registrations, got %d", successes)
+	}
+
+	var count int
+
+	err = pool.QueryRow(
+		ctx,
+		`
+		SELECT COUNT(*)
+		FROM inbox_messages
+		WHERE consumer_name = $1
+		  AND message_id = $2
+		`,
+		consumerName,
+		messageID,
+	).Scan(&count)
+	if err != nil {
+		t.Fatalf("count inbox messages: %v", err)
+	}
+
+	if count != 1 {
+		t.Fatalf(
+			"expected exactly 1 inbox row, got %d",
+			count,
+		)
+	}
+}
+
+func TestConcurrentRegisterSameMessageDifferentPayloadReturnsConflict(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+
+	pool, err := pgxpool.New(
+		ctx,
+		"postgres://wagering:wagering@localhost:5432/wagering?sslmode=disable",
+	)
+	if err != nil {
+		t.Fatalf("connect postgres: %v", err)
+	}
+	defer pool.Close()
+
+	_, err = pool.Exec(
+		ctx,
+		`TRUNCATE TABLE inbox_messages CASCADE`,
+	)
+	if err != nil {
+		t.Fatalf("clean inbox: %v", err)
+	}
+
+	const (
+		consumerName = "concurrent-conflict-consumer"
+		messageID    = "concurrent-conflict-message"
+	)
+
+	payloads := [][]byte{
+		[]byte(`{"type":"BET","amount":"10.00"}`),
+		[]byte(`{"type":"BET","amount":"50.00"}`),
+	}
+
+	type outcome struct {
+		err error
+	}
+
+	start := make(chan struct{})
+	outcomes := make(chan outcome, 2)
+
+	var wg sync.WaitGroup
+
+	for _, payload := range payloads {
+		payload := payload
+
+		wg.Add(1)
+
+		go func() {
+			defer wg.Done()
+
+			tx, err := pool.Begin(ctx)
+			if err != nil {
+				outcomes <- outcome{err: err}
+				return
+			}
+			defer tx.Rollback(ctx)
+
+			<-start
+
+			_, err = Register(
+				ctx,
+				tx,
+				consumerName,
+				messageID,
+				payload,
+			)
+			if err != nil {
+				outcomes <- outcome{err: err}
+				return
+			}
+
+			if err := tx.Commit(ctx); err != nil {
+				outcomes <- outcome{err: err}
+				return
+			}
+
+			outcomes <- outcome{}
+		}()
+	}
+
+	close(start)
+
+	wg.Wait()
+	close(outcomes)
+
+	successes := 0
+	conflicts := 0
+
+	for result := range outcomes {
+		switch {
+		case result.err == nil:
+			successes++
+
+		case errors.Is(result.err, ErrPayloadConflict):
+			conflicts++
+
+		default:
+			t.Fatalf("unexpected concurrent Register error: %v", result.err)
+		}
+	}
+
+	if successes != 1 {
+		t.Fatalf(
+			"expected exactly 1 successful registration, got %d",
+			successes,
+		)
+	}
+
+	if conflicts != 1 {
+		t.Fatalf(
+			"expected exactly 1 payload conflict, got %d",
+			conflicts,
+		)
+	}
+
+	var count int
+
+	err = pool.QueryRow(
+		ctx,
+		`
+		SELECT COUNT(*)
+		FROM inbox_messages
+		WHERE consumer_name = $1
+		  AND message_id = $2
+		`,
+		consumerName,
+		messageID,
+	).Scan(&count)
+	if err != nil {
+		t.Fatalf("count inbox messages: %v", err)
+	}
+
+	if count != 1 {
+		t.Fatalf(
+			"expected exactly 1 inbox row, got %d",
 			count,
 		)
 	}
