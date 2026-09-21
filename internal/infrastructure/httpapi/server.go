@@ -14,6 +14,7 @@ type Server struct {
 func NewServer(
 	walletHandler *WalletHandler,
 	wagerHandler *WagerHandler,
+	healthHandler *HealthHandler,
 ) *Server {
 	mux := http.NewServeMux()
 
@@ -33,6 +34,11 @@ func NewServer(
 	)
 
 	mux.HandleFunc(
+		"GET /wallets/{id}/reconciliation",
+		walletHandler.Reconcile,
+	)
+
+	mux.HandleFunc(
 		"POST /wagers",
 		wagerHandler.Process,
 	)
@@ -43,8 +49,13 @@ func NewServer(
 	)
 
 	mux.HandleFunc(
-		"GET /wallets/{id}/reconciliation",
-		walletHandler.Reconcile,
+		"GET /health/live",
+		healthHandler.Live,
+	)
+
+	mux.HandleFunc(
+		"GET /health/ready",
+		healthHandler.Ready,
 	)
 
 	return &Server{

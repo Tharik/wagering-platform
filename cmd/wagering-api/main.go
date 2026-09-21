@@ -52,6 +52,7 @@ func main() {
 			httpapi.NewWalletHandler,
 			httpapi.NewWagerHandler,
 			httpapi.NewServer,
+			httpapi.NewHealthHandler,
 
 			newSQSConsumer,
 			newSQSPublisher,
