@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"net/http"
+	"time"
 
 	"github.com/Tharik/wagering-platform/internal/application/wagering"
 	"github.com/Tharik/wagering-platform/internal/domain"
@@ -42,6 +43,27 @@ type processWagerResponse struct {
 	Currency         string `json:"currency"`
 	IdempotentReplay bool   `json:"idempotentReplay"`
 	FailureCode      string `json:"failureCode,omitempty"`
+}
+
+type wagerResponse struct {
+	TransactionID                  string  `json:"transactionId"`
+	ProviderID                     string  `json:"providerId,omitempty"`
+	ExternalTransactionID          string  `json:"externalTransactionId,omitempty"`
+	IdempotencyKey                 string  `json:"idempotencyKey,omitempty"`
+	WalletID                       string  `json:"walletId"`
+	PlayerID                       string  `json:"playerId"`
+	RoundID                        string  `json:"roundId,omitempty"`
+	GameID                         string  `json:"gameId,omitempty"`
+	Kind                           string  `json:"kind"`
+	State                          string  `json:"state"`
+	Amount                         string  `json:"amount"`
+	Currency                       string  `json:"currency"`
+	ReferenceExternalTransactionID string  `json:"referenceExternalTransactionId,omitempty"`
+	ReferencedTransactionID        string  `json:"referencedTransactionId,omitempty"`
+	FailureCode                    string  `json:"failureCode,omitempty"`
+	ResultBalance                  *string `json:"resultBalance,omitempty"`
+	CreatedAt                      string  `json:"createdAt"`
+	UpdatedAt                      string  `json:"updatedAt"`
 }
 
 func (h *WagerHandler) Process(
@@ -153,6 +175,78 @@ func (h *WagerHandler) Process(
 			Currency:         string(result.Balance.Currency()),
 			IdempotentReplay: result.IdempotentReplay,
 			FailureCode:      result.FailureCode,
+		},
+	)
+}
+
+func (h *WagerHandler) Get(
+	w http.ResponseWriter,
+	r *http.Request,
+) {
+	result, err := h.service.Get(
+		r.Context(),
+		r.PathValue("id"),
+	)
+	if err != nil {
+		if errors.Is(err, wagering.ErrWagerNotFound) {
+			writeJSON(
+				w,
+				http.StatusNotFound,
+				map[string]string{
+					"error": "wager transaction not found",
+				},
+			)
+			return
+		}
+
+		writeJSON(
+			w,
+			http.StatusInternalServerError,
+			map[string]string{
+				"error": "failed to query wager transaction",
+			},
+		)
+		return
+	}
+
+	amount := domain.NewMoney(
+		result.Amount,
+		domain.Currency(result.Currency),
+	)
+
+	var resultBalance *string
+
+	if result.ResultBalance != nil {
+		balance := domain.NewMoney(
+			*result.ResultBalance,
+			domain.Currency(result.Currency),
+		).String()
+
+		resultBalance = &balance
+	}
+
+	writeJSON(
+		w,
+		http.StatusOK,
+		wagerResponse{
+			TransactionID:                  result.TransactionID,
+			ProviderID:                     result.ProviderID,
+			ExternalTransactionID:          result.ExternalTransactionID,
+			IdempotencyKey:                 result.IdempotencyKey,
+			WalletID:                       result.WalletID,
+			PlayerID:                       result.PlayerID,
+			RoundID:                        result.RoundID,
+			GameID:                         result.GameID,
+			Kind:                           result.Kind,
+			State:                          result.State,
+			Amount:                         amount.String(),
+			Currency:                       result.Currency,
+			ReferenceExternalTransactionID: result.ReferenceExternalTransactionID,
+			ReferencedTransactionID:        result.ReferencedTransactionID,
+			FailureCode:                    result.FailureCode,
+			ResultBalance:                  resultBalance,
+			CreatedAt:                      result.CreatedAt.UTC().Format(time.RFC3339Nano),
+			UpdatedAt:                      result.UpdatedAt.UTC().Format(time.RFC3339Nano),
 		},
 	)
 }

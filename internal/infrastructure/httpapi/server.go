@@ -37,6 +37,11 @@ func NewServer(
 		wagerHandler.Process,
 	)
 
+	mux.HandleFunc(
+		"GET /wagers/{id}",
+		wagerHandler.Get,
+	)
+
 	return &Server{
 		server: &http.Server{
 			Addr:    ":8080",
