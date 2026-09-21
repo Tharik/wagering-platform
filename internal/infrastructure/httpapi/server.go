@@ -8,7 +8,8 @@ import (
 )
 
 type Server struct {
-	server *http.Server
+	server  *http.Server
+	handler http.Handler
 }
 
 func NewServer(
@@ -87,11 +88,16 @@ func NewServer(
 	)
 
 	return &Server{
+		handler: mux,
 		server: &http.Server{
 			Addr:    ":8080",
 			Handler: mux,
 		},
 	}
+}
+
+func (s *Server) Handler() http.Handler {
+	return s.handler
 }
 
 func (s *Server) Start() {
