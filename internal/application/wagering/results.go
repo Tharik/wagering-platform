@@ -11,7 +11,7 @@ import (
 	"github.com/jackc/pgx/v5"
 )
 
-func persistRejectedBet(
+func persistRejectedTransaction(
 	ctx context.Context,
 	tx pgx.Tx,
 	cmd ProcessCommand,
@@ -47,9 +47,9 @@ func persistRejectedBet(
 		VALUES (
 			$1, $2, $3, $4, $5,
 			$6, $7, $8, $9,
-			'BET', 'REJECTED',
-			$10, $11, $12, $13,
-			$14, $14
+			$10, 'REJECTED',
+			$11, $12, $13, $14,
+			$15, $15
 		)
 		`,
 		transactionID,
@@ -61,6 +61,7 @@ func persistRejectedBet(
 		cmd.Request.PlayerID,
 		cmd.Request.RoundID,
 		cmd.Request.GameID,
+		string(cmd.Request.Kind),
 		cmd.Request.Amount.Amount(),
 		string(cmd.Request.Amount.Currency()),
 		failureCode,
@@ -110,6 +111,7 @@ func insertProcessedEvents(
 	ctx context.Context,
 	tx pgx.Tx,
 	transactionID uuid.UUID,
+	kind domain.WagerKind,
 	wallet domain.Wallet,
 	amount domain.Money,
 	balanceBefore domain.Money,
@@ -123,11 +125,22 @@ func insertProcessedEvents(
 		map[string]any{
 			"transactionId": transactionID.String(),
 			"walletId":      wallet.ID,
-			"kind":          "BET",
+			"kind":          string(kind),
 		},
 		now,
 	); err != nil {
 		return err
+	}
+
+	// LOSS is processed successfully, but there is no balance movement.
+	if kind == domain.WagerKindLoss {
+		return nil
+	}
+
+	direction := "CREDIT"
+
+	if kind == domain.WagerKindBet {
+		direction = "DEBIT"
 	}
 
 	if err := insertOutboxEvent(
@@ -138,7 +151,7 @@ func insertProcessedEvents(
 		map[string]any{
 			"walletId":      wallet.ID,
 			"transactionId": transactionID.String(),
-			"direction":     "DEBIT",
+			"direction":     direction,
 			"amount":        amount.String(),
 			"currency":      string(amount.Currency()),
 			"balanceBefore": balanceBefore.String(),

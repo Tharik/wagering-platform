@@ -16,6 +16,7 @@ var (
 	ErrExternalTransactionExists = errors.New("external transaction already exists")
 	ErrWalletNotFound            = errors.New("wallet not found")
 	ErrWalletPlayerMismatch      = errors.New("wallet does not belong to player")
+	ErrInvalidLossAmount         = errors.New("LOSS amount must be zero")
 )
 
 type ProcessCommand struct {
@@ -51,29 +52,56 @@ func (s *Service) Process(
 		return ProcessResult{}, domain.ErrInvalidWagerKind
 	}
 
-	// For this first implementation slice we support BET.
-	// Other transaction kinds will be added through the same use case.
-	if cmd.Request.Kind != domain.WagerKindBet {
+	switch cmd.Request.Kind {
+	case domain.WagerKindBet,
+		domain.WagerKindWin,
+		domain.WagerKindLoss:
+		// Supported here.
+
+	case domain.WagerKindRefund,
+		domain.WagerKindRollback:
 		return ProcessResult{}, fmt.Errorf(
 			"wager kind %s not implemented yet",
 			cmd.Request.Kind,
 		)
+
+	default:
+		return ProcessResult{}, domain.ErrInvalidWagerKind
+	}
+
+	if cmd.Request.Kind == domain.WagerKindLoss &&
+		!cmd.Request.Amount.IsZero() {
+		return ProcessResult{}, ErrInvalidLossAmount
+	}
+
+	if cmd.Request.Kind != domain.WagerKindLoss &&
+		cmd.Request.Amount.Amount() <= 0 {
+		return ProcessResult{}, domain.ErrInvalidAmount
 	}
 
 	payloadHash, err := cmd.Request.PayloadHash()
 	if err != nil {
-		return ProcessResult{}, fmt.Errorf("calculate payload hash: %w", err)
+		return ProcessResult{}, fmt.Errorf(
+			"calculate payload hash: %w",
+			err,
+		)
 	}
 
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
-		return ProcessResult{}, fmt.Errorf("begin transaction: %w", err)
+		return ProcessResult{}, fmt.Errorf(
+			"begin transaction: %w",
+			err,
+		)
 	}
 
 	defer func() {
 		_ = tx.Rollback(ctx)
 	}()
 
+	// Fast path:
+	// if this idempotency key has already been processed,
+	// return the persisted original result without locking the wallet.
 	replay, found, err := findIdempotentReplay(
 		ctx,
 		tx,
@@ -87,12 +115,59 @@ func (s *Service) Process(
 
 	if found {
 		if err := tx.Commit(ctx); err != nil {
-			return ProcessResult{}, fmt.Errorf("commit replay transaction: %w", err)
+			return ProcessResult{}, fmt.Errorf(
+				"commit replay transaction: %w",
+				err,
+			)
 		}
 
 		return replay, nil
 	}
 
+	// Serialize financial decisions per wallet.
+	//
+	// This is a PostgreSQL row-level lock, so it works across
+	// different application processes and instances.
+	wallet, err := lockWallet(
+		ctx,
+		tx,
+		cmd.Request.WalletID,
+	)
+	if err != nil {
+		return ProcessResult{}, err
+	}
+
+	// Another request may have committed while this transaction
+	// was waiting for the wallet row lock.
+	//
+	// Therefore we must re-check idempotency after acquiring it.
+	replay, found, err = findIdempotentReplay(
+		ctx,
+		tx,
+		cmd.Request.ProviderID,
+		cmd.IdempotencyKey,
+		payloadHash,
+	)
+	if err != nil {
+		return ProcessResult{}, err
+	}
+
+	if found {
+		if err := tx.Commit(ctx); err != nil {
+			return ProcessResult{}, fmt.Errorf(
+				"commit replay transaction after wallet lock: %w",
+				err,
+			)
+		}
+
+		return replay, nil
+	}
+
+	// At this point we know this idempotency key does not exist.
+	//
+	// If the provider/externalTransactionId already exists,
+	// somebody is trying to reuse the same external transaction
+	// with a different idempotency identity.
 	exists, err := externalTransactionExists(
 		ctx,
 		tx,
@@ -107,15 +182,6 @@ func (s *Service) Process(
 		return ProcessResult{}, ErrExternalTransactionExists
 	}
 
-	wallet, err := lockWallet(
-		ctx,
-		tx,
-		cmd.Request.WalletID,
-	)
-	if err != nil {
-		return ProcessResult{}, err
-	}
-
 	if wallet.PlayerID != cmd.Request.PlayerID {
 		return ProcessResult{}, ErrWalletPlayerMismatch
 	}
@@ -125,25 +191,41 @@ func (s *Service) Process(
 	}
 
 	balanceBefore := wallet.Balance
+	now := time.Now().UTC()
 
-	err = wallet.Debit(cmd.Request.Amount, time.Now().UTC())
-	if err != nil {
-		if errors.Is(err, domain.ErrInsufficientFunds) {
-			return persistRejectedBet(
-				ctx,
-				tx,
-				cmd,
-				payloadHash,
-				wallet,
-				"INSUFFICIENT_FUNDS",
-			)
+	switch cmd.Request.Kind {
+	case domain.WagerKindBet:
+		if err := wallet.Debit(cmd.Request.Amount, now); err != nil {
+			if errors.Is(err, domain.ErrInsufficientFunds) {
+				return persistRejectedTransaction(
+					ctx,
+					tx,
+					cmd,
+					payloadHash,
+					wallet,
+					"INSUFFICIENT_FUNDS",
+				)
+			}
+
+			return ProcessResult{}, err
 		}
 
-		return ProcessResult{}, err
+	case domain.WagerKindWin:
+		if err := wallet.Credit(cmd.Request.Amount, now); err != nil {
+			return ProcessResult{}, err
+		}
+
+	case domain.WagerKindLoss:
+		// LOSS represents the outcome of an already placed wager.
+		// No additional balance movement occurs.
+		//
+		// Therefore:
+		// - no wallet balance change
+		// - no wallet version increment
+		// - no ledger entry
 	}
 
 	transactionID := uuid.New()
-	now := time.Now().UTC()
 
 	_, err = tx.Exec(
 		ctx,
@@ -169,9 +251,9 @@ func (s *Service) Process(
 		VALUES (
 			$1, $2, $3, $4, $5,
 			$6, $7, $8, $9,
-			'BET', 'PROCESSED',
-			$10, $11, $12,
-			$13, $13
+			$10, 'PROCESSED',
+			$11, $12, $13,
+			$14, $14
 		)
 		`,
 		transactionID,
@@ -183,65 +265,88 @@ func (s *Service) Process(
 		cmd.Request.PlayerID,
 		cmd.Request.RoundID,
 		cmd.Request.GameID,
+		string(cmd.Request.Kind),
 		cmd.Request.Amount.Amount(),
 		string(cmd.Request.Amount.Currency()),
 		wallet.Balance.Amount(),
 		now,
 	)
 	if err != nil {
-		return ProcessResult{}, fmt.Errorf("insert wager transaction: %w", err)
-	}
-
-	_, err = tx.Exec(
-		ctx,
-		`
-		UPDATE wallets
-		SET
-			balance = $2,
-			version = $3,
-			updated_at = $4
-		WHERE id = $1
-		`,
-		wallet.ID,
-		wallet.Balance.Amount(),
-		wallet.Version,
-		now,
-	)
-	if err != nil {
-		return ProcessResult{}, fmt.Errorf("update wallet: %w", err)
-	}
-
-	_, err = tx.Exec(
-		ctx,
-		`
-		INSERT INTO ledger_entries (
-			id,
-			wallet_id,
-			transaction_id,
-			direction,
-			amount,
-			balance_before,
-			balance_after,
-			created_at
+		return ProcessResult{}, fmt.Errorf(
+			"insert wager transaction: %w",
+			err,
 		)
-		VALUES ($1, $2, $3, 'DEBIT', $4, $5, $6, $7)
-		`,
-		uuid.New(),
-		wallet.ID,
-		transactionID,
-		cmd.Request.Amount.Amount(),
-		balanceBefore.Amount(),
-		wallet.Balance.Amount(),
-		now,
-	)
-	if err != nil {
-		return ProcessResult{}, fmt.Errorf("insert ledger entry: %w", err)
+	}
+
+	if cmd.Request.Kind != domain.WagerKindLoss {
+		_, err = tx.Exec(
+			ctx,
+			`
+			UPDATE wallets
+			SET
+				balance = $2,
+				version = $3,
+				updated_at = $4
+			WHERE id = $1
+			`,
+			wallet.ID,
+			wallet.Balance.Amount(),
+			wallet.Version,
+			now,
+		)
+		if err != nil {
+			return ProcessResult{}, fmt.Errorf(
+				"update wallet: %w",
+				err,
+			)
+		}
+
+		direction := "CREDIT"
+
+		if cmd.Request.Kind == domain.WagerKindBet {
+			direction = "DEBIT"
+		}
+
+		_, err = tx.Exec(
+			ctx,
+			`
+			INSERT INTO ledger_entries (
+				id,
+				wallet_id,
+				transaction_id,
+				direction,
+				amount,
+				balance_before,
+				balance_after,
+				created_at
+			)
+			VALUES (
+				$1, $2, $3, $4,
+				$5, $6, $7, $8
+			)
+			`,
+			uuid.New(),
+			wallet.ID,
+			transactionID,
+			direction,
+			cmd.Request.Amount.Amount(),
+			balanceBefore.Amount(),
+			wallet.Balance.Amount(),
+			now,
+		)
+		if err != nil {
+			return ProcessResult{}, fmt.Errorf(
+				"insert ledger entry: %w",
+				err,
+			)
+		}
 	}
 
 	if err := insertProcessedEvents(
 		ctx,
 		tx,
 		transactionID,
+		cmd.Request.Kind,
 		wallet,
 		cmd.Request.Amount,
 		balanceBefore,
@@ -251,7 +356,10 @@ func (s *Service) Process(
 	}
 
 	if err := tx.Commit(ctx); err != nil {
-		return ProcessResult{}, fmt.Errorf("commit wager transaction: %w", err)
+		return ProcessResult{}, fmt.Errorf(
+			"commit wager transaction: %w",
+			err,
+		)
 	}
 
 	return ProcessResult{
