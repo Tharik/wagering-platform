@@ -15,5 +15,22 @@ services:
     volumes:
       - postgres_data:/var/lib/postgresql/data
 
+  localstack:
+    image: localstack/localstack:4.14.0
+    environment:
+      SERVICES: sqs
+      AWS_DEFAULT_REGION: us-east-1
+      AWS_ACCESS_KEY_ID: test
+      AWS_SECRET_ACCESS_KEY: test
+    ports:
+      - "4566:4566"
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fs http://localhost:4566/_localstack/health >/dev/null"]
+      interval: 2s
+      timeout: 5s
+      retries: 15
+    volumes:
+      - ./localstack/init:/etc/localstack/init/ready.d
+
 volumes:
   postgres_data:

@@ -97,13 +97,6 @@ func persistPendingReference(
 		return ProcessResult{}, err
 	}
 
-	if err := tx.Commit(ctx); err != nil {
-		return ProcessResult{}, fmt.Errorf(
-			"commit pending reference transaction: %w",
-			err,
-		)
-	}
-
 	return ProcessResult{
 		TransactionID: transactionID.String(),
 		State:         domain.WagerStatePendingReference,

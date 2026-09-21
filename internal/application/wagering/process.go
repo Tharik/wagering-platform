@@ -8,6 +8,7 @@ import (
 
 	"github.com/Tharik/wagering-platform/internal/domain"
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -42,6 +43,38 @@ func NewService(pool *pgxpool.Pool) *Service {
 
 func (s *Service) Process(
 	ctx context.Context,
+	cmd ProcessCommand,
+) (ProcessResult, error) {
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return ProcessResult{}, fmt.Errorf(
+			"begin transaction: %w",
+			err,
+		)
+	}
+
+	defer func() {
+		_ = tx.Rollback(ctx)
+	}()
+
+	result, err := s.ProcessTx(ctx, tx, cmd)
+	if err != nil {
+		return ProcessResult{}, err
+	}
+
+	if err := tx.Commit(ctx); err != nil {
+		return ProcessResult{}, fmt.Errorf(
+			"commit wager transaction: %w",
+			err,
+		)
+	}
+
+	return result, nil
+}
+
+func (s *Service) ProcessTx(
+	ctx context.Context,
+	tx pgx.Tx,
 	cmd ProcessCommand,
 ) (ProcessResult, error) {
 	if cmd.IdempotencyKey == "" {
@@ -82,18 +115,6 @@ func (s *Service) Process(
 		)
 	}
 
-	tx, err := s.pool.Begin(ctx)
-	if err != nil {
-		return ProcessResult{}, fmt.Errorf(
-			"begin transaction: %w",
-			err,
-		)
-	}
-
-	defer func() {
-		_ = tx.Rollback(ctx)
-	}()
-
 	// Fast idempotency path.
 	replay, found, err := findIdempotentReplay(
 		ctx,
@@ -107,13 +128,6 @@ func (s *Service) Process(
 	}
 
 	if found {
-		if err := tx.Commit(ctx); err != nil {
-			return ProcessResult{}, fmt.Errorf(
-				"commit replay transaction: %w",
-				err,
-			)
-		}
-
 		return replay, nil
 	}
 
@@ -141,13 +155,6 @@ func (s *Service) Process(
 	}
 
 	if found {
-		if err := tx.Commit(ctx); err != nil {
-			return ProcessResult{}, fmt.Errorf(
-				"commit replay transaction after wallet lock: %w",
-				err,
-			)
-		}
-
 		return replay, nil
 	}
 
@@ -189,7 +196,7 @@ func (s *Service) Process(
 		}
 
 		if !found {
-			return persistPendingReference(
+			result, err := persistPendingReference(
 				ctx,
 				tx,
 				cmd,
@@ -197,6 +204,10 @@ func (s *Service) Process(
 				wallet.Balance,
 				time.Now().UTC(),
 			)
+			if err != nil {
+				return ProcessResult{}, err
+			}
+			return result, nil
 		}
 
 		if err := validateReference(
@@ -216,7 +227,7 @@ func (s *Service) Process(
 		}
 
 		if alreadyReversed {
-			return persistRejectedTransaction(
+			result, err := persistRejectedTransaction(
 				ctx,
 				tx,
 				cmd,
@@ -224,6 +235,10 @@ func (s *Service) Process(
 				wallet,
 				"ALREADY_REVERSED",
 			)
+			if err != nil {
+				return ProcessResult{}, err
+			}
+			return result, nil
 		}
 
 		reversalMovement, err = reversalDirection(
@@ -244,7 +259,7 @@ func (s *Service) Process(
 	case domain.WagerKindBet:
 		if err := wallet.Debit(cmd.Request.Amount, now); err != nil {
 			if errors.Is(err, domain.ErrInsufficientFunds) {
-				return persistRejectedTransaction(
+				result, err := persistRejectedTransaction(
 					ctx,
 					tx,
 					cmd,
@@ -252,6 +267,10 @@ func (s *Service) Process(
 					wallet,
 					"INSUFFICIENT_FUNDS",
 				)
+				if err != nil {
+					return ProcessResult{}, err
+				}
+				return result, nil
 			}
 
 			return ProcessResult{}, err
@@ -277,7 +296,7 @@ func (s *Service) Process(
 		case movementDebit:
 			if err := wallet.Debit(cmd.Request.Amount, now); err != nil {
 				if errors.Is(err, domain.ErrInsufficientFunds) {
-					return persistRejectedTransaction(
+					result, err := persistRejectedTransaction(
 						ctx,
 						tx,
 						cmd,
@@ -285,6 +304,10 @@ func (s *Service) Process(
 						wallet,
 						"REVERSAL_INSUFFICIENT_FUNDS",
 					)
+					if err != nil {
+						return ProcessResult{}, err
+					}
+					return result, nil
 				}
 
 				return ProcessResult{}, err
@@ -451,13 +474,6 @@ func (s *Service) Process(
 		now,
 	); err != nil {
 		return ProcessResult{}, err
-	}
-
-	if err := tx.Commit(ctx); err != nil {
-		return ProcessResult{}, fmt.Errorf(
-			"commit wager transaction: %w",
-			err,
-		)
 	}
 
 	return ProcessResult{

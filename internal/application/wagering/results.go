@@ -92,13 +92,6 @@ func persistRejectedTransaction(
 		return ProcessResult{}, err
 	}
 
-	if err := tx.Commit(ctx); err != nil {
-		return ProcessResult{}, fmt.Errorf(
-			"commit rejected wager transaction: %w",
-			err,
-		)
-	}
-
 	return ProcessResult{
 		TransactionID: transactionID.String(),
 		State:         domain.WagerStateRejected,
