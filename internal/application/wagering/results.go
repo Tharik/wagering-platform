@@ -115,6 +115,7 @@ func insertProcessedEvents(
 	wallet domain.Wallet,
 	amount domain.Money,
 	balanceBefore domain.Money,
+	direction string,
 	now time.Time,
 ) error {
 	if err := insertOutboxEvent(
@@ -135,12 +136,6 @@ func insertProcessedEvents(
 	// LOSS is processed successfully, but there is no balance movement.
 	if kind == domain.WagerKindLoss {
 		return nil
-	}
-
-	direction := "CREDIT"
-
-	if kind == domain.WagerKindBet {
-		direction = "DEBIT"
 	}
 
 	if err := insertOutboxEvent(

@@ -189,10 +189,13 @@ func (s *Service) Process(
 		}
 
 		if !found {
-			// Temporary behavior.
-			// This becomes PENDING_REFERENCE in the next stage.
-			return ProcessResult{}, errors.New(
-				"referenced transaction not found",
+			return persistPendingReference(
+				ctx,
+				tx,
+				cmd,
+				payloadHash,
+				wallet.Balance,
+				time.Now().UTC(),
 			)
 		}
 
@@ -404,6 +407,17 @@ func (s *Service) Process(
 			)
 		}
 	}
+	eventDirection := "CREDIT"
+
+	switch cmd.Request.Kind {
+	case domain.WagerKindBet:
+		eventDirection = "DEBIT"
+
+	case domain.WagerKindRollback:
+		if reversalMovement == movementDebit {
+			eventDirection = "DEBIT"
+		}
+	}
 
 	if err := insertProcessedEvents(
 		ctx,
@@ -413,6 +427,7 @@ func (s *Service) Process(
 		wallet,
 		cmd.Request.Amount,
 		balanceBefore,
+		eventDirection,
 		now,
 	); err != nil {
 		return ProcessResult{}, err
