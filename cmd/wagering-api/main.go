@@ -27,7 +27,7 @@ const (
 	defaultAWSRegion   = "us-east-1"
 	defaultSQSEndpoint = "http://localhost:4566"
 
-	defaultCommandsQueueURL = "http://sqs.us-east-1.localhost.localstack.cloud:4566/000000000000/wager-commands.fifo"
+	defaultCommandsQueueURL = "http://sqs.us-east-1.localhost.localstack.cloud:4566/000000000000/wager-transactions.fifo"
 	defaultEventsQueueURL   = "http://sqs.us-east-1.localhost.localstack.cloud:4566/000000000000/wager-events.fifo"
 
 	defaultOIDCIssuer = "http://localhost:8081/realms/wagering"
