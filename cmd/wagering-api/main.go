@@ -60,7 +60,7 @@ func main() {
 
 			wagering.NewServiceWithMetrics,
 			wagering.NewMessageProcessor,
-			wallet.NewService,
+			newWalletService,
 			wagering.NewPendingReferenceResolverWithMetrics,
 			newPendingReferenceWorker,
 
@@ -213,6 +213,16 @@ func newSQSClient(
 	}
 
 	return awssqs.New(options)
+}
+
+func newWalletService(
+	pool *pgxpool.Pool,
+	metrics *observability.Metrics,
+) *wallet.Service {
+	return wallet.NewServiceWithMetrics(
+		pool,
+		metrics,
+	)
 }
 
 func newHealthHandler(

@@ -1,11 +1,14 @@
 package wallet
 
 import (
+	"bytes"
 	"context"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/Tharik/wagering-platform/internal/domain"
+	"github.com/Tharik/wagering-platform/internal/observability"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -26,7 +29,8 @@ func TestReconciliationDetectsConsistentAndDivergentWallet(t *testing.T) {
 
 	cleanReconciliationDatabase(t, ctx, pool)
 
-	service := NewService(pool)
+	metrics := observability.NewMetrics()
+	service := NewServiceWithMetrics(pool, metrics)
 
 	created, err := service.Create(
 		ctx,
@@ -45,6 +49,7 @@ func TestReconciliationDetectsConsistentAndDivergentWallet(t *testing.T) {
 	// Wallet creation with 100.00 creates the OPENING ledger entry.
 	// Reconciliation must reconstruct exactly the same balance.
 	//
+
 	result, err := service.Reconcile(
 		ctx,
 		created.WalletID,
@@ -85,12 +90,15 @@ func TestReconciliationDetectsConsistentAndDivergentWallet(t *testing.T) {
 		)
 	}
 
+	assertReconciliationDivergenceMetric(t, metrics, 0)
+
 	//
 	// 2. Simulate database corruption / operational divergence.
 	//
 	// We intentionally modify only the materialized wallet balance.
 	// The immutable ledger remains untouched.
 	//
+
 	_, err = pool.Exec(
 		ctx,
 		`
@@ -139,11 +147,14 @@ func TestReconciliationDetectsConsistentAndDivergentWallet(t *testing.T) {
 		)
 	}
 
+	assertReconciliationDivergenceMetric(t, metrics, 1)
+
 	//
 	// 3. Reconciliation is diagnostic only.
 	//
 	// It must report the divergence, never silently repair financial state.
 	//
+
 	var persistedBalance int64
 
 	err = pool.QueryRow(
@@ -189,6 +200,50 @@ func TestReconciliationDetectsConsistentAndDivergentWallet(t *testing.T) {
 			ledgerBalanceAfter,
 		)
 	}
+}
+
+func assertReconciliationDivergenceMetric(
+	t *testing.T,
+	metrics *observability.Metrics,
+	expected uint64,
+) {
+	t.Helper()
+
+	var output bytes.Buffer
+
+	if err := metrics.WritePrometheus(&output); err != nil {
+		t.Fatalf("write prometheus metrics: %v", err)
+	}
+
+	expectedLine := "wagering_reconciliation_divergences_total " +
+		uintToString(expected)
+
+	if !strings.Contains(output.String(), expectedLine) {
+		t.Fatalf(
+			"expected metrics output to contain %q, got:\n%s",
+			expectedLine,
+			output.String(),
+		)
+	}
+}
+
+func uintToString(value uint64) string {
+	if value == 0 {
+		return "0"
+	}
+
+	const digits = "0123456789"
+
+	var buffer [20]byte
+	index := len(buffer)
+
+	for value > 0 {
+		index--
+		buffer[index] = digits[value%10]
+		value /= 10
+	}
+
+	return string(buffer[index:])
 }
 
 func cleanReconciliationDatabase(
