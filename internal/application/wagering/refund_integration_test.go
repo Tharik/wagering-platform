@@ -2,7 +2,6 @@ package wagering
 
 import (
 	"context"
-	"errors"
 	"testing"
 	"time"
 
@@ -62,29 +61,37 @@ func TestRefundWithPartialAmountIsRejected(t *testing.T) {
 	}
 
 	// Attempt to refund only 20 of the original 30.
-	_, err = service.Process(
-		ctx,
-		ProcessCommand{
-			IdempotencyKey: "partial-refund",
-			Request: domain.WagerRequest{
-				ProviderID:                     "provider-a",
-				ExternalTransactionID:          "external-partial-refund",
-				PlayerID:                       "player-partial-refund",
-				WalletID:                       createdWallet.WalletID,
-				RoundID:                        "round-1",
-				GameID:                         "game-1",
-				Kind:                           domain.WagerKindRefund,
-				Amount:                         domain.NewMoney(2000, domain.BRL),
-				ReferenceExternalTransactionID: "external-bet-partial",
-			},
+	refundCommand := ProcessCommand{
+		IdempotencyKey: "partial-refund",
+		Request: domain.WagerRequest{
+			ProviderID:                     "provider-a",
+			ExternalTransactionID:          "external-partial-refund",
+			PlayerID:                       "player-partial-refund",
+			WalletID:                       createdWallet.WalletID,
+			RoundID:                        "round-1",
+			GameID:                         "game-1",
+			Kind:                           domain.WagerKindRefund,
+			Amount:                         domain.NewMoney(2000, domain.BRL),
+			ReferenceExternalTransactionID: "external-bet-partial",
 		},
+	}
+	result, err := service.Process(
+		ctx,
+		refundCommand,
 	)
+	if err != nil {
+		t.Fatalf("process partial REFUND: %v", err)
+	}
+	if result.State != domain.WagerStateRejected || result.FailureCode != failureCodeReferenceAmountMismatch {
+		t.Fatalf("expected rejected %s, got state=%s code=%s", failureCodeReferenceAmountMismatch, result.State, result.FailureCode)
+	}
 
-	if !errors.Is(err, ErrReferenceAmountMismatch) {
-		t.Fatalf(
-			"expected ErrReferenceAmountMismatch, got %v",
-			err,
-		)
+	replay, err := service.Process(ctx, refundCommand)
+	if err != nil {
+		t.Fatalf("replay partial REFUND: %v", err)
+	}
+	if !replay.IdempotentReplay || replay.TransactionID != result.TransactionID || replay.Balance.Amount() != 7000 {
+		t.Fatalf("unexpected rejected replay: %+v", replay)
 	}
 
 	var balance int64
@@ -136,9 +143,9 @@ func TestRefundWithPartialAmountIsRejected(t *testing.T) {
 		t.Fatalf("count REFUND transactions: %v", err)
 	}
 
-	if refundCount != 0 {
+	if refundCount != 1 {
 		t.Fatalf(
-			"expected no REFUND transaction, got %d",
+			"expected one rejected REFUND transaction, got %d",
 			refundCount,
 		)
 	}
@@ -174,7 +181,7 @@ func TestRefundCannotReferenceWin(t *testing.T) {
 
 	service := NewService(pool)
 
-	_, err = service.Process(
+	result, err := service.Process(
 		ctx,
 		ProcessCommand{
 			IdempotencyKey: "win-for-invalid-refund",
@@ -195,7 +202,7 @@ func TestRefundCannotReferenceWin(t *testing.T) {
 	}
 
 	// REFUND is only allowed to reference BET.
-	_, err = service.Process(
+	result, err = service.Process(
 		ctx,
 		ProcessCommand{
 			IdempotencyKey: "refund-win-invalid",
@@ -213,11 +220,11 @@ func TestRefundCannotReferenceWin(t *testing.T) {
 		},
 	)
 
-	if !errors.Is(err, ErrInvalidReferenceKind) {
-		t.Fatalf(
-			"expected ErrInvalidReferenceKind, got %v",
-			err,
-		)
+	if err != nil {
+		t.Fatalf("process invalid REFUND: %v", err)
+	}
+	if result.State != domain.WagerStateRejected || result.FailureCode != failureCodeInvalidReferenceKind {
+		t.Fatalf("expected rejected %s, got state=%s code=%s", failureCodeInvalidReferenceKind, result.State, result.FailureCode)
 	}
 
 	var balance int64
@@ -268,9 +275,9 @@ func TestRefundCannotReferenceWin(t *testing.T) {
 		t.Fatalf("count REFUND transactions: %v", err)
 	}
 
-	if refundCount != 0 {
+	if refundCount != 1 {
 		t.Fatalf(
-			"expected no REFUND transaction, got %d",
+			"expected one rejected REFUND transaction, got %d",
 			refundCount,
 		)
 	}

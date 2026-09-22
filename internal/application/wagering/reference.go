@@ -17,6 +17,15 @@ var (
 	ErrAlreadyReversed         = errors.New("referenced transaction has already been reversed")
 )
 
+const (
+	failureCodeReferenceMismatch             = "REFERENCE_MISMATCH"
+	failureCodeReferenceAmountMismatch       = "REFERENCE_AMOUNT_MISMATCH"
+	failureCodeInvalidReferenceKind          = "INVALID_REFERENCE_KIND"
+	failureCodeInvalidReference              = "INVALID_REFERENCE"
+	failureCodeReferenceTerminalUnsuccessful = "REFERENCE_TERMINAL_UNSUCCESSFUL"
+	failureCodeAlreadyReversed               = "ALREADY_REVERSED"
+)
+
 type referencedTransaction struct {
 	ID                    uuid.UUID
 	ProviderID            string
@@ -98,12 +107,6 @@ func validateReference(
 	request domain.WagerRequest,
 	reference referencedTransaction,
 ) error {
-	// A reversal may only operate on a transaction that was
-	// successfully processed.
-	if reference.State != domain.WagerStateProcessed {
-		return ErrInvalidReferenceKind
-	}
-
 	// The reference must belong to exactly the same financial context.
 	if reference.ProviderID != request.ProviderID ||
 		reference.PlayerID != request.PlayerID ||

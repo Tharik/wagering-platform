@@ -302,6 +302,112 @@ func TestConsumerProcessesBetFromSQSAndDeletesMessage(t *testing.T) {
 		)
 	}
 }
+
+func TestConsumerCommitsAndDeletesDurablyRejectedReference(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+
+	pool, err := pgxpool.New(ctx, "postgres://wagering:wagering@localhost:5432/wagering?sslmode=disable")
+	if err != nil {
+		t.Fatalf("connect postgres: %v", err)
+	}
+	defer pool.Close()
+	cleanConsumerDatabase(t, ctx, pool)
+
+	createdWallet, err := wallet.NewService(pool).Create(ctx, wallet.CreateWalletCommand{
+		PlayerID:       "player-sqs-invalid-reference",
+		InitialBalance: domain.NewMoney(10000, domain.BRL),
+	})
+	if err != nil {
+		t.Fatalf("create wallet: %v", err)
+	}
+
+	service := wagering.NewService(pool)
+	_, err = service.Process(ctx, wagering.ProcessCommand{
+		IdempotencyKey: "sqs-reference-win",
+		Request: domain.WagerRequest{
+			ProviderID: "provider-a", ExternalTransactionID: "sqs-reference-win", PlayerID: "player-sqs-invalid-reference",
+			WalletID: createdWallet.WalletID, RoundID: "round-1", GameID: "game-1", Kind: domain.WagerKindWin,
+			Amount: domain.NewMoney(3000, domain.BRL),
+		},
+	})
+	if err != nil {
+		t.Fatalf("process reference WIN: %v", err)
+	}
+
+	client := newTestSQSClient()
+	queueURL := createIsolatedCommandsQueue(t, ctx, client)
+	consumer := NewConsumer(client, wagering.NewMessageProcessor(pool, service), queueURL)
+	command := CommandMessage{
+		MessageID: "sqs-invalid-reference-" + uuid.NewString(), Type: wagerTransactionRequestedType,
+		OccurredAt: time.Now().UTC().Format(time.RFC3339),
+		Data: WagerCommandData{
+			ProviderID: "provider-a", ExternalTransactionID: "sqs-invalid-refund", IdempotencyKey: "sqs-invalid-refund",
+			PlayerID: "player-sqs-invalid-reference", WalletID: createdWallet.WalletID, RoundID: "round-1", GameID: "game-1",
+			Kind: "REFUND", Money: MoneyDTO{Amount: "30.00", Currency: "BRL"},
+			ReferenceExternalTransactionID: "sqs-reference-win",
+		},
+	}
+	payload, err := json.Marshal(command)
+	if err != nil {
+		t.Fatalf("marshal command: %v", err)
+	}
+	_, err = client.SendMessage(ctx, &awssqs.SendMessageInput{
+		QueueUrl: aws.String(queueURL), MessageBody: aws.String(string(payload)),
+		MessageGroupId: aws.String(createdWallet.WalletID), MessageDeduplicationId: aws.String(command.MessageID),
+	})
+	if err != nil {
+		t.Fatalf("send command: %v", err)
+	}
+
+	for {
+		processed, consumeErr := consumer.ConsumeOnce(ctx)
+		if consumeErr != nil {
+			t.Fatalf("consume rejected command: %v", consumeErr)
+		}
+		if processed == 1 {
+			break
+		}
+		if ctx.Err() != nil {
+			t.Fatalf("wait for rejected command: %v", ctx.Err())
+		}
+	}
+
+	var (
+		state       string
+		failureCode string
+		completedAt *time.Time
+		balance     int64
+		version     int64
+	)
+	if err := pool.QueryRow(ctx, `SELECT state, failure_code FROM wager_transactions WHERE provider_id = $1 AND external_transaction_id = $2`, "provider-a", "sqs-invalid-refund").Scan(&state, &failureCode); err != nil {
+		t.Fatalf("query rejected wager: %v", err)
+	}
+	if state != string(domain.WagerStateRejected) || failureCode != "INVALID_REFERENCE_KIND" {
+		t.Fatalf("expected durable invalid-kind rejection, got state=%s code=%s", state, failureCode)
+	}
+	if err := pool.QueryRow(ctx, `SELECT completed_at FROM inbox_messages WHERE consumer_name = $1 AND message_id = $2`, defaultConsumerName, command.MessageID).Scan(&completedAt); err != nil {
+		t.Fatalf("query inbox: %v", err)
+	}
+	if completedAt == nil {
+		t.Fatal("expected rejected message inbox entry to be complete")
+	}
+	if err := pool.QueryRow(ctx, `SELECT balance, version FROM wallets WHERE id = $1`, createdWallet.WalletID).Scan(&balance, &version); err != nil {
+		t.Fatalf("query wallet: %v", err)
+	}
+	if balance != 13000 || version != 2 {
+		t.Fatalf("expected rejected refund not to move wallet, got %d/version %d", balance, version)
+	}
+
+	output, err := client.ReceiveMessage(ctx, &awssqs.ReceiveMessageInput{QueueUrl: aws.String(queueURL), MaxNumberOfMessages: 1, WaitTimeSeconds: 1})
+	if err != nil {
+		t.Fatalf("receive after rejection: %v", err)
+	}
+	if len(output.Messages) != 0 {
+		t.Fatalf("expected rejected business message to be deleted, got %d messages", len(output.Messages))
+	}
+}
+
 func newTestSQSClient() *awssqs.Client {
 	return awssqs.New(
 		awssqs.Options{

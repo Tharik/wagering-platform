@@ -249,11 +249,62 @@ func (s *Service) ProcessTx(
 			return result, nil
 		}
 
-		if err := validateReference(
-			cmd.Request,
-			foundReference,
-		); err != nil {
-			return ProcessResult{}, err
+		switch foundReference.State {
+		case domain.WagerStatePending,
+			domain.WagerStatePendingReference:
+			result, err := persistPendingReference(
+				ctx,
+				tx,
+				cmd,
+				payloadHash,
+				wallet.Balance,
+				time.Now().UTC(),
+			)
+			if err != nil {
+				return ProcessResult{}, err
+			}
+			return result, nil
+
+		case domain.WagerStateRejected,
+			domain.WagerStateFailed:
+			result, err := persistRejectedTransaction(
+				ctx,
+				tx,
+				cmd,
+				payloadHash,
+				wallet,
+				failureCodeReferenceTerminalUnsuccessful,
+				&foundReference.ID,
+			)
+			if err != nil {
+				return ProcessResult{}, err
+			}
+			return result, nil
+
+		case domain.WagerStateProcessed:
+			// Validate the immutable reference below.
+
+		default:
+			return ProcessResult{}, fmt.Errorf(
+				"unsupported referenced transaction state %q",
+				foundReference.State,
+			)
+		}
+
+		if err := validateReference(cmd.Request, foundReference); err != nil {
+			result, persistErr := persistRejectedTransaction(
+				ctx,
+				tx,
+				cmd,
+				payloadHash,
+				wallet,
+				referenceFailureCode(err),
+				&foundReference.ID,
+			)
+			if persistErr != nil {
+				return ProcessResult{}, persistErr
+			}
+			return result, nil
 		}
 
 		alreadyReversed, err := referenceAlreadyReversed(
@@ -272,7 +323,8 @@ func (s *Service) ProcessTx(
 				cmd,
 				payloadHash,
 				wallet,
-				"ALREADY_REVERSED",
+				failureCodeAlreadyReversed,
+				&foundReference.ID,
 			)
 			if err != nil {
 				return ProcessResult{}, err
@@ -305,6 +357,7 @@ func (s *Service) ProcessTx(
 					payloadHash,
 					wallet,
 					"INSUFFICIENT_FUNDS",
+					nil,
 				)
 				if err != nil {
 					return ProcessResult{}, err
@@ -342,6 +395,7 @@ func (s *Service) ProcessTx(
 						payloadHash,
 						wallet,
 						"REVERSAL_INSUFFICIENT_FUNDS",
+						&reference.ID,
 					)
 					if err != nil {
 						return ProcessResult{}, err

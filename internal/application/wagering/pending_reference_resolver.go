@@ -90,6 +90,7 @@ func (r *PendingReferenceResolver) ResolveOne(
 			wallet,
 			"REFERENCE_EXPIRED",
 			now,
+			nil,
 		); err != nil {
 			return false, err
 		}
@@ -137,9 +138,57 @@ func (r *PendingReferenceResolver) ResolveOne(
 		return true, nil
 	}
 
-	// Once the referenced external transaction exists, validation failures
-	// are terminal: that reference cannot later become a different
-	// transaction.
+	switch reference.State {
+	case domain.WagerStatePending,
+		domain.WagerStatePendingReference:
+		if err := schedulePendingReferenceRetry(ctx, tx, pending, now); err != nil {
+			return false, err
+		}
+
+		if err := tx.Commit(ctx); err != nil {
+			return false, fmt.Errorf(
+				"commit pending reference dependency retry: %w",
+				err,
+			)
+		}
+
+		return true, nil
+
+	case domain.WagerStateRejected,
+		domain.WagerStateFailed:
+		if err := rejectPendingReference(
+			ctx,
+			tx,
+			pending,
+			wallet,
+			failureCodeReferenceTerminalUnsuccessful,
+			now,
+			&reference.ID,
+		); err != nil {
+			return false, err
+		}
+
+		if err := tx.Commit(ctx); err != nil {
+			return false, fmt.Errorf(
+				"commit terminal unsuccessful reference: %w",
+				err,
+			)
+		}
+
+		r.metrics.IncWagersRejected()
+
+		return true, nil
+
+	case domain.WagerStateProcessed:
+		// Validate the immutable reference below.
+
+	default:
+		return false, fmt.Errorf(
+			"unsupported referenced transaction state %q",
+			reference.State,
+		)
+	}
+
 	if err := validateReference(
 		pending.Request,
 		reference,
@@ -153,6 +202,7 @@ func (r *PendingReferenceResolver) ResolveOne(
 			wallet,
 			failureCode,
 			now,
+			&reference.ID,
 		); err != nil {
 			return false, err
 		}
@@ -184,8 +234,9 @@ func (r *PendingReferenceResolver) ResolveOne(
 			tx,
 			pending,
 			wallet,
-			"ALREADY_REVERSED",
+			failureCodeAlreadyReversed,
 			now,
+			&reference.ID,
 		); err != nil {
 			return false, err
 		}
@@ -234,6 +285,7 @@ func (r *PendingReferenceResolver) ResolveOne(
 					wallet,
 					"REVERSAL_INSUFFICIENT_FUNDS",
 					now,
+					&reference.ID,
 				); err != nil {
 					return false, err
 				}
@@ -546,16 +598,16 @@ func referenceRetryBackoff(attempt int) time.Duration {
 func referenceFailureCode(err error) string {
 	switch {
 	case errors.Is(err, ErrReferenceMismatch):
-		return "REFERENCE_MISMATCH"
+		return failureCodeReferenceMismatch
 
 	case errors.Is(err, ErrReferenceAmountMismatch):
-		return "REFERENCE_AMOUNT_MISMATCH"
+		return failureCodeReferenceAmountMismatch
 
 	case errors.Is(err, ErrInvalidReferenceKind):
-		return "INVALID_REFERENCE_KIND"
+		return failureCodeInvalidReferenceKind
 
 	default:
-		return "INVALID_REFERENCE"
+		return failureCodeInvalidReference
 	}
 }
 
@@ -566,6 +618,7 @@ func rejectPendingReference(
 	wallet domain.Wallet,
 	failureCode string,
 	now time.Time,
+	referencedTransactionID *uuid.UUID,
 ) error {
 	commandTag, err := tx.Exec(
 		ctx,
@@ -575,14 +628,16 @@ func rejectPendingReference(
 			state = 'REJECTED',
 			failure_code = $2,
 			result_balance = $3,
+			referenced_transaction_id = $4,
 			reference_next_attempt_at = NULL,
-			updated_at = $4
+			updated_at = $5
 		WHERE id = $1
 		  AND state = 'PENDING_REFERENCE'
 		`,
 		pending.ID,
 		failureCode,
 		wallet.Balance.Amount(),
+		referencedTransactionID,
 		now,
 	)
 	if err != nil {

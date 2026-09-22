@@ -18,6 +18,7 @@ func persistRejectedTransaction(
 	payloadHash string,
 	wallet domain.Wallet,
 	failureCode string,
+	referencedTransactionID *uuid.UUID,
 ) (ProcessResult, error) {
 	transactionID := uuid.New()
 	now := time.Now().UTC()
@@ -39,6 +40,8 @@ func persistRejectedTransaction(
 			state,
 			amount,
 			currency,
+			reference_external_transaction_id,
+			referenced_transaction_id,
 			failure_code,
 			result_balance,
 			created_at,
@@ -49,7 +52,7 @@ func persistRejectedTransaction(
 			$6, $7, $8, $9,
 			$10, 'REJECTED',
 			$11, $12, $13, $14,
-			$15, $15
+			$15, $16, $17, $17
 		)
 		`,
 		transactionID,
@@ -64,6 +67,8 @@ func persistRejectedTransaction(
 		string(cmd.Request.Kind),
 		cmd.Request.Amount.Amount(),
 		string(cmd.Request.Amount.Currency()),
+		cmd.Request.ReferenceExternalTransactionID,
+		referencedTransactionID,
 		failureCode,
 		wallet.Balance.Amount(),
 		now,
