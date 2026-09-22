@@ -2,7 +2,7 @@ package worker
 
 import (
 	"context"
-	"log"
+	"log/slog"
 	"time"
 )
 
@@ -14,37 +14,44 @@ type Consumer interface {
 
 type ConsumerWorker struct {
 	consumer Consumer
+	logger   *slog.Logger
 }
 
-func NewConsumerWorker(consumer Consumer) *ConsumerWorker {
+func NewConsumerWorker(
+	consumer Consumer,
+	logger *slog.Logger,
+) *ConsumerWorker {
 	return &ConsumerWorker{
 		consumer: consumer,
+		logger: logger.With(
+			slog.String("component", "sqs_consumer"),
+		),
 	}
 }
 
 func (w *ConsumerWorker) Run(ctx context.Context) {
-	log.Println("SQS consumer worker started")
+	w.logger.Info("worker started")
 
 	for {
 		if ctx.Err() != nil {
-			log.Println("SQS consumer worker stopped")
+			w.logger.Info("worker stopped")
 			return
 		}
 
 		processed, err := w.consumer.ConsumeOnce(ctx)
 		if err != nil {
 			if ctx.Err() != nil {
-				log.Println("SQS consumer worker stopped")
+				w.logger.Info("worker stopped")
 				return
 			}
 
-			log.Printf(
-				"SQS consumer worker error: %v",
-				err,
+			w.logger.Error(
+				"message consumption failed",
+				slog.Any("error", err),
 			)
 
 			if !wait(ctx, consumerErrorDelay) {
-				log.Println("SQS consumer worker stopped")
+				w.logger.Info("worker stopped")
 				return
 			}
 
@@ -52,9 +59,9 @@ func (w *ConsumerWorker) Run(ctx context.Context) {
 		}
 
 		if processed > 0 {
-			log.Printf(
-				"SQS consumer processed %d message(s)",
-				processed,
+			w.logger.Info(
+				"messages processed",
+				slog.Int("count", processed),
 			)
 		}
 	}

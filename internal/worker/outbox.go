@@ -2,7 +2,7 @@ package worker
 
 import (
 	"context"
-	"log"
+	"log/slog"
 	"time"
 )
 
@@ -17,39 +17,44 @@ type OutboxPublisher interface {
 
 type OutboxWorker struct {
 	publisher OutboxPublisher
+	logger    *slog.Logger
 }
 
 func NewOutboxWorker(
 	publisher OutboxPublisher,
+	logger *slog.Logger,
 ) *OutboxWorker {
 	return &OutboxWorker{
 		publisher: publisher,
+		logger: logger.With(
+			slog.String("component", "outbox_publisher"),
+		),
 	}
 }
 
 func (w *OutboxWorker) Run(ctx context.Context) {
-	log.Println("outbox publisher worker started")
+	w.logger.Info("worker started")
 
 	for {
 		if ctx.Err() != nil {
-			log.Println("outbox publisher worker stopped")
+			w.logger.Info("worker stopped")
 			return
 		}
 
 		published, err := w.publisher.PublishBatch(ctx)
 		if err != nil {
 			if ctx.Err() != nil {
-				log.Println("outbox publisher worker stopped")
+				w.logger.Info("worker stopped")
 				return
 			}
 
-			log.Printf(
-				"outbox publisher worker error: %v",
-				err,
+			w.logger.Error(
+				"outbox publish failed",
+				slog.Any("error", err),
 			)
 
 			if !wait(ctx, outboxErrorDelay) {
-				log.Println("outbox publisher worker stopped")
+				w.logger.Info("worker stopped")
 				return
 			}
 
@@ -59,15 +64,15 @@ func (w *OutboxWorker) Run(ctx context.Context) {
 		// If there was work, immediately ask for another batch.
 		// This drains a backlog without an unnecessary delay.
 		if published > 0 {
-			log.Printf(
-				"outbox publisher published %d event(s)",
-				published,
+			w.logger.Info(
+				"outbox events published",
+				slog.Int("count", published),
 			)
 			continue
 		}
 
 		if !wait(ctx, outboxIdleDelay) {
-			log.Println("outbox publisher worker stopped")
+			w.logger.Info("worker stopped")
 			return
 		}
 	}

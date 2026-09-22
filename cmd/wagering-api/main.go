@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"log/slog"
 	"os"
 	"sync"
 
@@ -48,6 +49,7 @@ func main() {
 			newPool,
 			newSQSClient,
 			newAuthMiddleware,
+			newLogger,
 
 			wagering.NewService,
 			wagering.NewMessageProcessor,
@@ -99,6 +101,17 @@ func loadConfig() config {
 			defaultOIDCIssuer,
 		),
 	}
+}
+
+func newLogger() *slog.Logger {
+	return slog.New(
+		slog.NewJSONHandler(
+			os.Stdout,
+			&slog.HandlerOptions{
+				Level: slog.LevelInfo,
+			},
+		),
+	)
 }
 
 func newDatabase(
@@ -197,17 +210,21 @@ func newOutboxPublisher(
 
 func newConsumerWorker(
 	consumer *messagingsqs.Consumer,
+	logger *slog.Logger,
 ) *worker.ConsumerWorker {
 	return worker.NewConsumerWorker(
 		consumer,
+		logger,
 	)
 }
 
 func newOutboxWorker(
 	publisher *outbox.Publisher,
+	logger *slog.Logger,
 ) *worker.OutboxWorker {
 	return worker.NewOutboxWorker(
 		publisher,
+		logger,
 	)
 }
 

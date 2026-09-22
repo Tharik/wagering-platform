@@ -3,13 +3,14 @@ package httpapi
 import (
 	"context"
 	"errors"
-	"log"
+	"log/slog"
 	"net/http"
 )
 
 type Server struct {
 	server  *http.Server
 	handler http.Handler
+	logger  *slog.Logger
 }
 
 func NewServer(
@@ -17,6 +18,7 @@ func NewServer(
 	wagerHandler *WagerHandler,
 	healthHandler *HealthHandler,
 	auth *AuthMiddleware,
+	logger *slog.Logger,
 ) *Server {
 	mux := http.NewServeMux()
 
@@ -89,6 +91,9 @@ func NewServer(
 
 	return &Server{
 		handler: mux,
+		logger: logger.With(
+			slog.String("component", "http_server"),
+		),
 		server: &http.Server{
 			Addr:    ":8080",
 			Handler: mux,
@@ -102,16 +107,16 @@ func (s *Server) Handler() http.Handler {
 
 func (s *Server) Start() {
 	go func() {
-		log.Printf(
-			"HTTP server listening on %s",
-			s.server.Addr,
+		s.logger.Info(
+			"server started",
+			slog.String("address", s.server.Addr),
 		)
 
 		if err := s.server.ListenAndServe(); err != nil &&
 			!errors.Is(err, http.ErrServerClosed) {
-			log.Printf(
-				"HTTP server error: %v",
-				err,
+			s.logger.Error(
+				"server failed",
+				slog.Any("error", err),
 			)
 		}
 	}()

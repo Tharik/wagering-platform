@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"io"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -51,11 +52,16 @@ func TestOIDCAuthenticationAndProviderIsolation(t *testing.T) {
 	wagerHandler := NewWagerHandler(wagerService)
 	healthHandler := NewHealthHandler(pool)
 
+	logger := slog.New(
+		slog.NewJSONHandler(io.Discard, nil),
+	)
+
 	server := NewServer(
 		walletHandler,
 		wagerHandler,
 		healthHandler,
 		auth,
+		logger,
 	)
 
 	testServer := httptest.NewServer(server.Handler())
