@@ -42,9 +42,9 @@ create_fifo_queue_with_dlq \
   "wager-events.fifo" \
   "wager-events-dlq.fifo"
 
-# Inbound wager commands consumed by the application.
+# Inbound wager transactions consumed by the application.
 create_fifo_queue_with_dlq \
-  "wager-commands.fifo" \
-  "wager-commands-dlq.fifo"
+  "wager-transactions.fifo" \
+  "wager-transactions-dlq.fifo"
 
 echo "SQS queues created."

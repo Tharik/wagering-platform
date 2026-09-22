@@ -21,8 +21,8 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
-const testCommandsQueueURL = "http://sqs.us-east-1.localhost.localstack.cloud:4566/000000000000/wager-commands.fifo"
-const testCommandsDLQURL = "http://sqs.us-east-1.localhost.localstack.cloud:4566/000000000000/wager-commands-dlq.fifo"
+const testCommandsQueueURL = "http://sqs.us-east-1.localhost.localstack.cloud:4566/000000000000/wager-transactions.fifo"
+const testCommandsDLQURL = "http://sqs.us-east-1.localhost.localstack.cloud:4566/000000000000/wager-transactions-dlq.fifo"
 
 func TestConsumerProcessesBetFromSQSAndDeletesMessage(t *testing.T) {
 	ctx, cancel := context.WithTimeout(
@@ -68,17 +68,21 @@ func TestConsumerProcessesBetFromSQSAndDeletesMessage(t *testing.T) {
 	)
 
 	command := CommandMessage{
-		MessageID:             "sqs-message-" + uuid.NewString(),
-		IdempotencyKey:        "sqs-idempotency-" + uuid.NewString(),
-		ProviderID:            "provider-a",
-		ExternalTransactionID: "sqs-bet-" + uuid.NewString(),
-		PlayerID:              "player-sqs-consumer",
-		WalletID:              createdWallet.WalletID,
-		RoundID:               "round-sqs-1",
-		GameID:                "game-1",
-		Kind:                  "BET",
-		Amount:                "30.00",
-		Currency:              "BRL",
+		MessageID:  "sqs-message-" + uuid.NewString(),
+		Type:       "WAGER_TRANSACTION",
+		OccurredAt: time.Now().UTC().Format(time.RFC3339),
+		Data: WagerCommandData{
+			IdempotencyKey:        "sqs-idempotency-" + uuid.NewString(),
+			ProviderID:            "provider-a",
+			ExternalTransactionID: "sqs-bet-" + uuid.NewString(),
+			PlayerID:              "player-sqs-consumer",
+			WalletID:              createdWallet.WalletID,
+			RoundID:               "round-sqs-1",
+			GameID:                "game-1",
+			Kind:                  "BET",
+			Amount:                "30.00",
+			Currency:              "BRL",
+		},
 	}
 
 	payload, err := json.Marshal(command)
@@ -297,17 +301,21 @@ func TestConsumerDoesNotProcessBetAgainWhenDeleteFailsAfterCommit(t *testing.T) 
 	)
 
 	command := CommandMessage{
-		MessageID:             "sqs-redelivery-message-" + uuid.NewString(),
-		IdempotencyKey:        "sqs-redelivery-idempotency-" + uuid.NewString(),
-		ProviderID:            "provider-a",
-		ExternalTransactionID: "sqs-redelivery-bet-" + uuid.NewString(),
-		PlayerID:              "player-sqs-redelivery",
-		WalletID:              createdWallet.WalletID,
-		RoundID:               "round-sqs-redelivery",
-		GameID:                "game-1",
-		Kind:                  "BET",
-		Amount:                "30.00",
-		Currency:              "BRL",
+		MessageID:  "sqs-redelivery-message-" + uuid.NewString(),
+		Type:       "WAGER_TRANSACTION",
+		OccurredAt: time.Now().UTC().Format(time.RFC3339),
+		Data: WagerCommandData{
+			IdempotencyKey:        "sqs-redelivery-idempotency-" + uuid.NewString(),
+			ProviderID:            "provider-a",
+			ExternalTransactionID: "sqs-redelivery-bet-" + uuid.NewString(),
+			PlayerID:              "player-sqs-redelivery",
+			WalletID:              createdWallet.WalletID,
+			RoundID:               "round-sqs-redelivery",
+			GameID:                "game-1",
+			Kind:                  "BET",
+			Amount:                "30.00",
+			Currency:              "BRL",
+		},
 	}
 
 	payload, err := json.Marshal(command)
@@ -538,19 +546,23 @@ func TestConsumerRetriesInvalidMessageAndMovesItToDLQ(t *testing.T) {
 	)
 
 	command := CommandMessage{
-		MessageID:             "sqs-invalid-" + uuid.NewString(),
-		IdempotencyKey:        "sqs-invalid-idempotency-" + uuid.NewString(),
-		ProviderID:            "provider-a",
-		ExternalTransactionID: "sqs-invalid-tx-" + uuid.NewString(),
-		PlayerID:              "player-sqs-dlq",
-		WalletID:              createdWallet.WalletID,
-		RoundID:               "round-sqs-dlq",
-		GameID:                "game-1",
-		Kind:                  "BET",
-		Amount:                "10.00",
+		MessageID:  "sqs-invalid-" + uuid.NewString(),
+		Type:       "WAGER_TRANSACTION",
+		OccurredAt: time.Now().UTC().Format(time.RFC3339),
+		Data: WagerCommandData{
+			IdempotencyKey:        "sqs-invalid-idempotency-" + uuid.NewString(),
+			ProviderID:            "provider-a",
+			ExternalTransactionID: "sqs-invalid-tx-" + uuid.NewString(),
+			PlayerID:              "player-sqs-dlq",
+			WalletID:              createdWallet.WalletID,
+			RoundID:               "round-sqs-dlq",
+			GameID:                "game-1",
+			Kind:                  "BET",
+			Amount:                "10.00",
 
-		// Currency intentionally omitted.
-		// decodeCommand must fail and the message must not be deleted.
+			// Currency intentionally omitted.
+			// decodeCommand must fail and the message must not be deleted.
+		},
 	}
 
 	payload, err := json.Marshal(command)

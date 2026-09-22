@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"strconv"
+	"time"
 
 	"github.com/Tharik/wagering-platform/internal/application/wagering"
 	"github.com/Tharik/wagering-platform/internal/domain"
@@ -15,7 +16,7 @@ import (
 	awstypes "github.com/aws/aws-sdk-go-v2/service/sqs/types"
 )
 
-const defaultConsumerName = "wager-commands"
+const defaultConsumerName = "wager-transactions"
 
 type ConsumerClient interface {
 	ReceiveMessage(
@@ -47,7 +48,13 @@ type Consumer struct {
 }
 
 type CommandMessage struct {
-	MessageID                      string `json:"messageId"`
+	MessageID  string           `json:"messageId"`
+	Type       string           `json:"type"`
+	OccurredAt string           `json:"occurredAt"`
+	Data       WagerCommandData `json:"data"`
+}
+
+type WagerCommandData struct {
 	IdempotencyKey                 string `json:"idempotencyKey"`
 	ProviderID                     string `json:"providerId"`
 	ExternalTransactionID          string `json:"externalTransactionId"`
@@ -171,17 +178,17 @@ func (c *Consumer) processMessage(
 			MessageID:    command.MessageID,
 			RawPayload:   rawPayload,
 			Command: wagering.ProcessCommand{
-				IdempotencyKey: command.IdempotencyKey,
+				IdempotencyKey: command.Data.IdempotencyKey,
 				Request: domain.WagerRequest{
-					ProviderID:                     command.ProviderID,
-					ExternalTransactionID:          command.ExternalTransactionID,
-					PlayerID:                       command.PlayerID,
-					WalletID:                       command.WalletID,
-					RoundID:                        command.RoundID,
-					GameID:                         command.GameID,
-					Kind:                           domain.WagerKind(command.Kind),
+					ProviderID:                     command.Data.ProviderID,
+					ExternalTransactionID:          command.Data.ExternalTransactionID,
+					PlayerID:                       command.Data.PlayerID,
+					WalletID:                       command.Data.WalletID,
+					RoundID:                        command.Data.RoundID,
+					GameID:                         command.Data.GameID,
+					Kind:                           domain.WagerKind(command.Data.Kind),
 					Amount:                         command.money,
-					ReferenceExternalTransactionID: command.ReferenceExternalTransactionID,
+					ReferenceExternalTransactionID: command.Data.ReferenceExternalTransactionID,
 				},
 			},
 		},
@@ -235,29 +242,47 @@ func decodeCommand(payload []byte) (decodedCommand, error) {
 		)
 	}
 
-	if message.IdempotencyKey == "" {
+	if message.Type == "" {
+		return decodedCommand{}, errors.New(
+			"type is required",
+		)
+	}
+
+	if message.OccurredAt == "" {
+		return decodedCommand{}, errors.New(
+			"occurredAt is required",
+		)
+	}
+
+	if _, err := time.Parse(time.RFC3339, message.OccurredAt); err != nil {
+		return decodedCommand{}, errors.New(
+			"occurredAt must be RFC3339",
+		)
+	}
+
+	if message.Data.IdempotencyKey == "" {
 		return decodedCommand{}, errors.New(
 			"idempotencyKey is required",
 		)
 	}
 
-	if message.Currency == "" {
+	if message.Data.Currency == "" {
 		return decodedCommand{}, errors.New(
 			"currency is required",
 		)
 	}
 
-	currency := domain.Currency(message.Currency)
+	currency := domain.Currency(message.Data.Currency)
 
 	if currency != domain.BRL {
 		return decodedCommand{}, fmt.Errorf(
 			"unsupported currency: %s",
-			message.Currency,
+			message.Data.Currency,
 		)
 	}
 
 	money, err := domain.ParseMoney(
-		message.Amount,
+		message.Data.Amount,
 		currency,
 	)
 	if err != nil {
