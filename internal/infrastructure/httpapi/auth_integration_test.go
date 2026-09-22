@@ -15,6 +15,7 @@ import (
 
 	wageringapp "github.com/Tharik/wagering-platform/internal/application/wagering"
 	walletapp "github.com/Tharik/wagering-platform/internal/application/wallet"
+	"github.com/Tharik/wagering-platform/internal/observability"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -52,6 +53,9 @@ func TestOIDCAuthenticationAndProviderIsolation(t *testing.T) {
 	wagerHandler := NewWagerHandler(wagerService)
 	healthHandler := NewHealthHandler(pool)
 
+	metrics := observability.NewMetrics()
+	metricsHandler := NewMetricsHandler(metrics)
+
 	logger := slog.New(
 		slog.NewJSONHandler(io.Discard, nil),
 	)
@@ -60,6 +64,7 @@ func TestOIDCAuthenticationAndProviderIsolation(t *testing.T) {
 		walletHandler,
 		wagerHandler,
 		healthHandler,
+		metricsHandler,
 		auth,
 		logger,
 	)

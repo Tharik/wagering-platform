@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"time"
 
 	"github.com/Tharik/wagering-platform/internal/infrastructure/messaging/inbox"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -41,6 +42,14 @@ func (p *MessageProcessor) Process(
 	ctx context.Context,
 	cmd MessageProcessCommand,
 ) (MessageProcessResult, error) {
+	startedAt := time.Now()
+
+	defer func() {
+		p.service.metrics.ObserveProcessingDuration(
+			time.Since(startedAt),
+		)
+	}()
+
 	if cmd.ConsumerName == "" {
 		return MessageProcessResult{}, errors.New(
 			"consumer name is required",
@@ -122,6 +131,8 @@ func (p *MessageProcessor) Process(
 			err,
 		)
 	}
+
+	p.service.recordProcessResult(result)
 
 	return MessageProcessResult{
 		Result:           result,

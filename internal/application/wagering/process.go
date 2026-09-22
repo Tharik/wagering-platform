@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/Tharik/wagering-platform/internal/domain"
+	"github.com/Tharik/wagering-platform/internal/observability"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -34,17 +35,41 @@ type ProcessResult struct {
 }
 
 type Service struct {
-	pool *pgxpool.Pool
+	pool    *pgxpool.Pool
+	metrics *observability.Metrics
 }
 
-func NewService(pool *pgxpool.Pool) *Service {
-	return &Service{pool: pool}
+func NewService(
+	pool *pgxpool.Pool,
+) *Service {
+	return &Service{
+		pool:    pool,
+		metrics: observability.NewMetrics(),
+	}
+}
+
+func NewServiceWithMetrics(
+	pool *pgxpool.Pool,
+	metrics *observability.Metrics,
+) *Service {
+	return &Service{
+		pool:    pool,
+		metrics: metrics,
+	}
 }
 
 func (s *Service) Process(
 	ctx context.Context,
 	cmd ProcessCommand,
 ) (ProcessResult, error) {
+	startedAt := time.Now()
+
+	defer func() {
+		s.metrics.ObserveProcessingDuration(
+			time.Since(startedAt),
+		)
+	}()
+
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
 		return ProcessResult{}, fmt.Errorf(
@@ -68,6 +93,8 @@ func (s *Service) Process(
 			err,
 		)
 	}
+
+	s.recordProcessResult(result)
 
 	return result, nil
 }
@@ -481,4 +508,24 @@ func (s *Service) ProcessTx(
 		State:         domain.WagerStateProcessed,
 		Balance:       wallet.Balance,
 	}, nil
+}
+
+func (s *Service) recordProcessResult(
+	result ProcessResult,
+) {
+	if result.IdempotentReplay {
+		s.metrics.IncIdempotentReplays()
+		return
+	}
+
+	switch result.State {
+	case domain.WagerStateProcessed:
+		s.metrics.IncWagersProcessed()
+
+	case domain.WagerStateRejected:
+		s.metrics.IncWagersRejected()
+
+	case domain.WagerStatePendingReference:
+		s.metrics.IncWagersPendingReference()
+	}
 }

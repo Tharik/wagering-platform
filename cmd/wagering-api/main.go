@@ -12,6 +12,7 @@ import (
 	"github.com/Tharik/wagering-platform/internal/infrastructure/messaging/outbox"
 	messagingsqs "github.com/Tharik/wagering-platform/internal/infrastructure/messaging/sqs"
 	"github.com/Tharik/wagering-platform/internal/infrastructure/postgres"
+	"github.com/Tharik/wagering-platform/internal/observability"
 	"github.com/Tharik/wagering-platform/internal/worker"
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/credentials"
@@ -50,15 +51,19 @@ func main() {
 			newSQSClient,
 			newAuthMiddleware,
 			newLogger,
+			observability.NewMetrics,
 
-			wagering.NewService,
+			wagering.NewServiceWithMetrics,
 			wagering.NewMessageProcessor,
 			wallet.NewService,
+			wagering.NewPendingReferenceResolverWithMetrics,
+			newPendingReferenceWorker,
 
 			httpapi.NewWalletHandler,
 			httpapi.NewWagerHandler,
 			httpapi.NewHealthHandler,
 			httpapi.NewServer,
+			httpapi.NewMetricsHandler,
 
 			newSQSConsumer,
 			newSQSPublisher,
@@ -180,11 +185,13 @@ func newSQSConsumer(
 	client *awssqs.Client,
 	processor *wagering.MessageProcessor,
 	cfg config,
+	metrics *observability.Metrics,
 ) *messagingsqs.Consumer {
-	return messagingsqs.NewConsumer(
+	return messagingsqs.NewConsumerWithMetrics(
 		client,
 		processor,
 		cfg.CommandsQueueURL,
+		metrics,
 	)
 }
 
@@ -201,29 +208,45 @@ func newSQSPublisher(
 func newOutboxPublisher(
 	pool *pgxpool.Pool,
 	publisher *messagingsqs.Publisher,
+	metrics *observability.Metrics,
 ) *outbox.Publisher {
-	return outbox.NewPublisher(
+	return outbox.NewPublisherWithMetrics(
 		pool,
 		publisher,
+		metrics,
 	)
 }
 
 func newConsumerWorker(
 	consumer *messagingsqs.Consumer,
 	logger *slog.Logger,
+	metrics *observability.Metrics,
 ) *worker.ConsumerWorker {
 	return worker.NewConsumerWorker(
 		consumer,
 		logger,
+		metrics,
 	)
 }
 
 func newOutboxWorker(
 	publisher *outbox.Publisher,
 	logger *slog.Logger,
+	metrics *observability.Metrics,
 ) *worker.OutboxWorker {
 	return worker.NewOutboxWorker(
 		publisher,
+		logger,
+		metrics,
+	)
+}
+
+func newPendingReferenceWorker(
+	resolver *wagering.PendingReferenceResolver,
+	logger *slog.Logger,
+) *worker.PendingReferenceWorker {
+	return worker.NewPendingReferenceWorker(
+		resolver,
 		logger,
 	)
 }
@@ -232,6 +255,7 @@ func registerLifecycle(
 	lifecycle fx.Lifecycle,
 	consumerWorker *worker.ConsumerWorker,
 	outboxWorker *worker.OutboxWorker,
+	pendingReferenceWorker *worker.PendingReferenceWorker,
 	httpServer *httpapi.Server,
 ) {
 	var cancel context.CancelFunc
@@ -247,7 +271,7 @@ func registerLifecycle(
 
 				httpServer.Start()
 
-				workers.Add(2)
+				workers.Add(3)
 
 				go func() {
 					defer workers.Done()
@@ -257,6 +281,11 @@ func registerLifecycle(
 				go func() {
 					defer workers.Done()
 					outboxWorker.Run(workerContext)
+				}()
+
+				go func() {
+					defer workers.Done()
+					pendingReferenceWorker.Run(workerContext)
 				}()
 
 				return nil

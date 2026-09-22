@@ -4,6 +4,8 @@ import (
 	"context"
 	"log/slog"
 	"time"
+
+	"github.com/Tharik/wagering-platform/internal/observability"
 )
 
 const (
@@ -18,17 +20,20 @@ type OutboxPublisher interface {
 type OutboxWorker struct {
 	publisher OutboxPublisher
 	logger    *slog.Logger
+	metrics   *observability.Metrics
 }
 
 func NewOutboxWorker(
 	publisher OutboxPublisher,
 	logger *slog.Logger,
+	metrics *observability.Metrics,
 ) *OutboxWorker {
 	return &OutboxWorker{
 		publisher: publisher,
 		logger: logger.With(
 			slog.String("component", "outbox_publisher"),
 		),
+		metrics: metrics,
 	}
 }
 
@@ -48,6 +53,8 @@ func (w *OutboxWorker) Run(ctx context.Context) {
 				return
 			}
 
+			w.metrics.IncOutboxErrors()
+
 			w.logger.Error(
 				"outbox publish failed",
 				slog.Any("error", err),
@@ -61,13 +68,14 @@ func (w *OutboxWorker) Run(ctx context.Context) {
 			continue
 		}
 
-		// If there was work, immediately ask for another batch.
-		// This drains a backlog without an unnecessary delay.
 		if published > 0 {
+			w.metrics.IncOutboxEventsPublished(uint64(published))
+
 			w.logger.Info(
 				"outbox events published",
 				slog.Int("count", published),
 			)
+
 			continue
 		}
 

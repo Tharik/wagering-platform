@@ -5,9 +5,11 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strconv"
 
 	"github.com/Tharik/wagering-platform/internal/application/wagering"
 	"github.com/Tharik/wagering-platform/internal/domain"
+	"github.com/Tharik/wagering-platform/internal/observability"
 	"github.com/aws/aws-sdk-go-v2/aws"
 	awssqs "github.com/aws/aws-sdk-go-v2/service/sqs"
 	awstypes "github.com/aws/aws-sdk-go-v2/service/sqs/types"
@@ -41,6 +43,7 @@ type Consumer struct {
 	processor    MessageProcessor
 	queueURL     string
 	consumerName string
+	metrics      *observability.Metrics
 }
 
 type CommandMessage struct {
@@ -68,6 +71,22 @@ func NewConsumer(
 		processor:    processor,
 		queueURL:     queueURL,
 		consumerName: defaultConsumerName,
+		metrics:      observability.NewMetrics(),
+	}
+}
+
+func NewConsumerWithMetrics(
+	client ConsumerClient,
+	processor MessageProcessor,
+	queueURL string,
+	metrics *observability.Metrics,
+) *Consumer {
+	return &Consumer{
+		client:       client,
+		processor:    processor,
+		queueURL:     queueURL,
+		consumerName: defaultConsumerName,
+		metrics:      metrics,
 	}
 }
 
@@ -78,6 +97,9 @@ func (c *Consumer) ConsumeOnce(ctx context.Context) (int, error) {
 			QueueUrl:            aws.String(c.queueURL),
 			MaxNumberOfMessages: 10,
 			WaitTimeSeconds:     10,
+			MessageSystemAttributeNames: []awstypes.MessageSystemAttributeName{
+				awstypes.MessageSystemAttributeNameApproximateReceiveCount,
+			},
 		},
 	)
 	if err != nil {
@@ -90,6 +112,8 @@ func (c *Consumer) ConsumeOnce(ctx context.Context) (int, error) {
 	processed := 0
 
 	for _, message := range output.Messages {
+		c.recordRetry(message)
+
 		if err := c.processMessage(ctx, message); err != nil {
 			return processed, err
 		}
@@ -98,6 +122,24 @@ func (c *Consumer) ConsumeOnce(ctx context.Context) (int, error) {
 	}
 
 	return processed, nil
+}
+
+func (c *Consumer) recordRetry(message awstypes.Message) {
+	rawReceiveCount, ok := message.Attributes[string(
+		awstypes.MessageSystemAttributeNameApproximateReceiveCount,
+	)]
+	if !ok {
+		return
+	}
+
+	receiveCount, err := strconv.Atoi(rawReceiveCount)
+	if err != nil {
+		return
+	}
+
+	if receiveCount > 1 {
+		c.metrics.IncSQSRetries()
+	}
 }
 
 func (c *Consumer) processMessage(

@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/Tharik/wagering-platform/internal/domain"
+	"github.com/Tharik/wagering-platform/internal/observability"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -15,14 +16,26 @@ import (
 const maxReferenceRetryDelay = time.Minute
 
 type PendingReferenceResolver struct {
-	pool *pgxpool.Pool
+	pool    *pgxpool.Pool
+	metrics *observability.Metrics
 }
 
 func NewPendingReferenceResolver(
 	pool *pgxpool.Pool,
 ) *PendingReferenceResolver {
 	return &PendingReferenceResolver{
-		pool: pool,
+		pool:    pool,
+		metrics: observability.NewMetrics(),
+	}
+}
+
+func NewPendingReferenceResolverWithMetrics(
+	pool *pgxpool.Pool,
+	metrics *observability.Metrics,
+) *PendingReferenceResolver {
+	return &PendingReferenceResolver{
+		pool:    pool,
+		metrics: metrics,
 	}
 }
 
@@ -89,6 +102,8 @@ func (r *PendingReferenceResolver) ResolveOne(
 			)
 		}
 
+		r.metrics.IncWagersRejected()
+
 		return true, nil
 	}
 
@@ -118,6 +133,8 @@ func (r *PendingReferenceResolver) ResolveOne(
 			)
 		}
 
+		// This is only a retry. The transaction is still
+		// PENDING_REFERENCE, so do not count it again.
 		return true, nil
 	}
 
@@ -147,6 +164,8 @@ func (r *PendingReferenceResolver) ResolveOne(
 				err,
 			)
 		}
+
+		r.metrics.IncWagersRejected()
 
 		return true, nil
 	}
@@ -178,6 +197,8 @@ func (r *PendingReferenceResolver) ResolveOne(
 				err,
 			)
 		}
+
+		r.metrics.IncWagersRejected()
 
 		return true, nil
 	}
@@ -224,6 +245,8 @@ func (r *PendingReferenceResolver) ResolveOne(
 						err,
 					)
 				}
+
+				r.metrics.IncWagersRejected()
 
 				return true, nil
 			}
@@ -350,6 +373,8 @@ func (r *PendingReferenceResolver) ResolveOne(
 			err,
 		)
 	}
+
+	r.metrics.IncWagersProcessed()
 
 	return true, nil
 }

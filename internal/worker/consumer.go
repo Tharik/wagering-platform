@@ -4,6 +4,8 @@ import (
 	"context"
 	"log/slog"
 	"time"
+
+	"github.com/Tharik/wagering-platform/internal/observability"
 )
 
 const consumerErrorDelay = time.Second
@@ -15,17 +17,20 @@ type Consumer interface {
 type ConsumerWorker struct {
 	consumer Consumer
 	logger   *slog.Logger
+	metrics  *observability.Metrics
 }
 
 func NewConsumerWorker(
 	consumer Consumer,
 	logger *slog.Logger,
+	metrics *observability.Metrics,
 ) *ConsumerWorker {
 	return &ConsumerWorker{
 		consumer: consumer,
 		logger: logger.With(
 			slog.String("component", "sqs_consumer"),
 		),
+		metrics: metrics,
 	}
 }
 
@@ -45,6 +50,8 @@ func (w *ConsumerWorker) Run(ctx context.Context) {
 				return
 			}
 
+			w.metrics.IncSQSErrors()
+
 			w.logger.Error(
 				"message consumption failed",
 				slog.Any("error", err),
@@ -59,6 +66,8 @@ func (w *ConsumerWorker) Run(ctx context.Context) {
 		}
 
 		if processed > 0 {
+			w.metrics.IncSQSMessagesProcessed(uint64(processed))
+
 			w.logger.Info(
 				"messages processed",
 				slog.Int("count", processed),

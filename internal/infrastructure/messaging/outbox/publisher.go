@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/Tharik/wagering-platform/internal/observability"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -19,6 +20,7 @@ const (
 type Publisher struct {
 	pool      *pgxpool.Pool
 	publisher MessagePublisher
+	metrics   *observability.Metrics
 }
 
 func NewPublisher(
@@ -28,6 +30,19 @@ func NewPublisher(
 	return &Publisher{
 		pool:      pool,
 		publisher: publisher,
+		metrics:   observability.NewMetrics(),
+	}
+}
+
+func NewPublisherWithMetrics(
+	pool *pgxpool.Pool,
+	publisher MessagePublisher,
+	metrics *observability.Metrics,
+) *Publisher {
+	return &Publisher{
+		pool:      pool,
+		publisher: publisher,
+		metrics:   metrics,
 	}
 }
 
@@ -53,7 +68,8 @@ func (p *Publisher) PublishBatch(ctx context.Context) (int, error) {
 		return 0, err
 	}
 
-	published := 0
+	publishedEvents := make([]Event, 0, len(events))
+	retried := 0
 
 	for _, event := range events {
 		if err := p.publisher.Publish(ctx, event); err != nil {
@@ -62,9 +78,10 @@ func (p *Publisher) PublishBatch(ctx context.Context) (int, error) {
 				tx,
 				event,
 			); err != nil {
-				return published, err
+				return len(publishedEvents), err
 			}
 
+			retried++
 			continue
 		}
 
@@ -73,20 +90,40 @@ func (p *Publisher) PublishBatch(ctx context.Context) (int, error) {
 			tx,
 			event.ID,
 		); err != nil {
-			return published, err
+			return len(publishedEvents), err
 		}
 
-		published++
+		publishedEvents = append(
+			publishedEvents,
+			event,
+		)
 	}
 
 	if err := tx.Commit(ctx); err != nil {
-		return published, fmt.Errorf(
+		return len(publishedEvents), fmt.Errorf(
 			"commit outbox transaction: %w",
 			err,
 		)
 	}
 
-	return published, nil
+	// Metrics are recorded only after the database commit succeeds.
+	// Before this point, neither the published state nor retry schedule
+	// is durably committed.
+	if retried > 0 {
+		for i := 0; i < retried; i++ {
+			p.metrics.IncOutboxRetries()
+		}
+	}
+
+	now := time.Now()
+
+	for _, event := range publishedEvents {
+		p.metrics.ObserveOutboxPublishedDelay(
+			now.Sub(event.OccurredAt),
+		)
+	}
+
+	return len(publishedEvents), nil
 }
 
 func findPending(
@@ -119,6 +156,7 @@ func findPending(
 			err,
 		)
 	}
+
 	defer rows.Close()
 
 	events := make([]Event, 0, limit)

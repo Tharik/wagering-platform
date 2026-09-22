@@ -17,6 +17,7 @@ func NewServer(
 	walletHandler *WalletHandler,
 	wagerHandler *WagerHandler,
 	healthHandler *HealthHandler,
+	metricsHandler *MetricsHandler,
 	auth *AuthMiddleware,
 	logger *slog.Logger,
 ) *Server {
@@ -88,6 +89,8 @@ func NewServer(
 		"GET /health/ready",
 		healthHandler.Ready,
 	)
+
+	mux.Handle("GET /metrics", metricsHandler)
 
 	return &Server{
 		handler: mux,
