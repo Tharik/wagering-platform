@@ -29,6 +29,7 @@ func (s *Service) Reconcile(
 	}
 
 	consistent := true
+
 	var ledgerBalance int64
 
 	if len(entries) > 0 {
@@ -65,6 +66,10 @@ func (s *Service) Reconcile(
 
 	if ledgerBalance != wallet.Balance {
 		consistent = false
+	}
+
+	if !consistent {
+		s.metrics.IncReconciliationDivergences()
 	}
 
 	return ReconciliationResult{

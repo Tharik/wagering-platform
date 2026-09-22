@@ -32,6 +32,8 @@ const (
 	defaultEventsQueueURL   = "http://sqs.us-east-1.localhost.localstack.cloud:4566/000000000000/wager-events.fifo"
 
 	defaultOIDCIssuer = "http://localhost:8081/realms/wagering"
+
+	defaultHTTPAddress = ":8080"
 )
 
 type config struct {
@@ -42,6 +44,7 @@ type config struct {
 	CommandsDLQURL   string
 	EventsQueueURL   string
 	OIDCIssuer       string
+	HTTPAddress      string
 }
 
 func main() {
@@ -64,7 +67,7 @@ func main() {
 			httpapi.NewWalletHandler,
 			httpapi.NewWagerHandler,
 			newHealthHandler,
-			httpapi.NewServer,
+			newHTTPServer,
 			httpapi.NewMetricsHandler,
 
 			newSQSConsumer,
@@ -112,6 +115,10 @@ func loadConfig() config {
 			"OIDC_ISSUER",
 			defaultOIDCIssuer,
 		),
+		HTTPAddress: envOrDefault(
+			"HTTP_ADDRESS",
+			defaultHTTPAddress,
+		),
 	}
 }
 
@@ -123,6 +130,26 @@ func newLogger() *slog.Logger {
 				Level: slog.LevelInfo,
 			},
 		),
+	)
+}
+
+func newHTTPServer(
+	walletHandler *httpapi.WalletHandler,
+	wagerHandler *httpapi.WagerHandler,
+	healthHandler *httpapi.HealthHandler,
+	metricsHandler *httpapi.MetricsHandler,
+	auth *httpapi.AuthMiddleware,
+	logger *slog.Logger,
+	cfg config,
+) *httpapi.Server {
+	return httpapi.NewServerWithAddress(
+		walletHandler,
+		wagerHandler,
+		healthHandler,
+		metricsHandler,
+		auth,
+		logger,
+		cfg.HTTPAddress,
 	)
 }
 

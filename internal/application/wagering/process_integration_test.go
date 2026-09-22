@@ -12,27 +12,26 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
-func TestConcurrentBetsOnSameWalletAllowOnlyOneDebit(t *testing.T) {
+func TestConcurrentBetsAcrossIndependentInstancesAllowOnlyOneDebit(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
 
-	pool, err := pgxpool.New(
-		ctx,
-		"postgres://wagering:wagering@localhost:5432/wagering?sslmode=disable",
-	)
+	const databaseURL = "postgres://wagering:wagering@localhost:5432/wagering?sslmode=disable"
+
+	setupPool, err := pgxpool.New(ctx, databaseURL)
 	if err != nil {
-		t.Fatalf("connect postgres: %v", err)
+		t.Fatalf("connect setup postgres: %v", err)
 	}
-	defer pool.Close()
+	defer setupPool.Close()
 
-	cleanDatabase(t, ctx, pool)
+	cleanDatabase(t, ctx, setupPool)
 
-	walletService := wallet.NewService(pool)
+	walletService := wallet.NewService(setupPool)
 
 	createdWallet, err := walletService.Create(
 		ctx,
 		wallet.CreateWalletCommand{
-			PlayerID:       "player-concurrent",
+			PlayerID:       "player-multi-instance",
 			InitialBalance: domain.NewMoney(10000, domain.BRL),
 		},
 	)
@@ -40,30 +39,44 @@ func TestConcurrentBetsOnSameWalletAllowOnlyOneDebit(t *testing.T) {
 		t.Fatalf("create wallet: %v", err)
 	}
 
-	service := NewService(pool)
+	// Three independent connection pools simulate three independent
+	// application instances. No in-memory synchronization is shared
+	// between these services; coordination must happen in PostgreSQL.
+	instancePools := make([]*pgxpool.Pool, 3)
+	services := make([]*Service, 3)
+
+	for i := range instancePools {
+		instancePools[i], err = pgxpool.New(ctx, databaseURL)
+		if err != nil {
+			t.Fatalf("connect postgres for instance %d: %v", i+1, err)
+		}
+		defer instancePools[i].Close()
+
+		services[i] = NewService(instancePools[i])
+	}
 
 	commands := []ProcessCommand{
 		{
-			IdempotencyKey: "bet-80-a",
+			IdempotencyKey: "multi-instance-bet-80-a",
 			Request: domain.WagerRequest{
 				ProviderID:            "provider-a",
-				ExternalTransactionID: "external-bet-a",
-				PlayerID:              "player-concurrent",
+				ExternalTransactionID: "external-multi-instance-bet-a",
+				PlayerID:              "player-multi-instance",
 				WalletID:              createdWallet.WalletID,
-				RoundID:               "round-1",
+				RoundID:               "round-multi-instance",
 				GameID:                "game-1",
 				Kind:                  domain.WagerKindBet,
 				Amount:                domain.NewMoney(8000, domain.BRL),
 			},
 		},
 		{
-			IdempotencyKey: "bet-80-b",
+			IdempotencyKey: "multi-instance-bet-80-b",
 			Request: domain.WagerRequest{
 				ProviderID:            "provider-a",
-				ExternalTransactionID: "external-bet-b",
-				PlayerID:              "player-concurrent",
+				ExternalTransactionID: "external-multi-instance-bet-b",
+				PlayerID:              "player-multi-instance",
 				WalletID:              createdWallet.WalletID,
-				RoundID:               "round-1",
+				RoundID:               "round-multi-instance",
 				GameID:                "game-1",
 				Kind:                  domain.WagerKindBet,
 				Amount:                domain.NewMoney(8000, domain.BRL),
@@ -81,14 +94,13 @@ func TestConcurrentBetsOnSameWalletAllowOnlyOneDebit(t *testing.T) {
 
 	var wg sync.WaitGroup
 
-	for _, command := range commands {
+	// Requests intentionally go through different service instances.
+	for i, command := range commands {
 		wg.Add(1)
 
-		go func(cmd ProcessCommand) {
+		go func(service *Service, cmd ProcessCommand) {
 			defer wg.Done()
 
-			// Both goroutines wait here so that they start as close
-			// together as possible.
 			<-start
 
 			result, err := service.Process(ctx, cmd)
@@ -97,7 +109,7 @@ func TestConcurrentBetsOnSameWalletAllowOnlyOneDebit(t *testing.T) {
 				result: result,
 				err:    err,
 			}
-		}(command)
+		}(services[i], command)
 	}
 
 	close(start)
@@ -144,18 +156,19 @@ func TestConcurrentBetsOnSameWalletAllowOnlyOneDebit(t *testing.T) {
 	}
 
 	var finalBalance int64
+	var finalVersion int64
 
-	err = pool.QueryRow(
+	err = setupPool.QueryRow(
 		ctx,
 		`
-		SELECT balance
+		SELECT balance, version
 		FROM wallets
 		WHERE id = $1
 		`,
 		createdWallet.WalletID,
-	).Scan(&finalBalance)
+	).Scan(&finalBalance, &finalVersion)
 	if err != nil {
-		t.Fatalf("query final wallet balance: %v", err)
+		t.Fatalf("query final wallet: %v", err)
 	}
 
 	if finalBalance != 2000 {
@@ -165,9 +178,16 @@ func TestConcurrentBetsOnSameWalletAllowOnlyOneDebit(t *testing.T) {
 		)
 	}
 
+	if finalVersion != 2 {
+		t.Fatalf(
+			"expected wallet version 2, got %d",
+			finalVersion,
+		)
+	}
+
 	var debitCount int
 
-	err = pool.QueryRow(
+	err = setupPool.QueryRow(
 		ctx,
 		`
 		SELECT COUNT(*)
@@ -190,7 +210,7 @@ func TestConcurrentBetsOnSameWalletAllowOnlyOneDebit(t *testing.T) {
 
 	var processedTransactions int
 
-	err = pool.QueryRow(
+	err = setupPool.QueryRow(
 		ctx,
 		`
 		SELECT COUNT(*)
@@ -214,7 +234,7 @@ func TestConcurrentBetsOnSameWalletAllowOnlyOneDebit(t *testing.T) {
 
 	var rejectedTransactions int
 
-	err = pool.QueryRow(
+	err = setupPool.QueryRow(
 		ctx,
 		`
 		SELECT COUNT(*)
@@ -234,6 +254,13 @@ func TestConcurrentBetsOnSameWalletAllowOnlyOneDebit(t *testing.T) {
 			"expected 1 rejected BET, got %d",
 			rejectedTransactions,
 		)
+	}
+
+	// The third instance did not participate in these two requests on purpose.
+	// Its existence demonstrates that the service can be independently
+	// instantiated against the same database without shared process state.
+	if services[2] == nil {
+		t.Fatal("expected third independent service instance")
 	}
 }
 
@@ -1655,6 +1682,239 @@ func TestConcurrentSameExternalTransactionAcrossDifferentWallets(t *testing.T) {
 			"expected exactly one wallet to be debited; got walletA=%d walletB=%d",
 			balanceA,
 			balanceB,
+		)
+	}
+}
+
+func TestConcurrentBetsOnDifferentWalletsAreProcessedIndependently(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+
+	const databaseURL = "postgres://wagering:wagering@localhost:5432/wagering?sslmode=disable"
+
+	setupPool, err := pgxpool.New(ctx, databaseURL)
+	if err != nil {
+		t.Fatalf("connect setup postgres: %v", err)
+	}
+	defer setupPool.Close()
+
+	cleanDatabase(t, ctx, setupPool)
+
+	walletService := wallet.NewService(setupPool)
+
+	walletA, err := walletService.Create(
+		ctx,
+		wallet.CreateWalletCommand{
+			PlayerID:       "player-parallel-a",
+			InitialBalance: domain.NewMoney(10000, domain.BRL),
+		},
+	)
+	if err != nil {
+		t.Fatalf("create wallet A: %v", err)
+	}
+
+	walletB, err := walletService.Create(
+		ctx,
+		wallet.CreateWalletCommand{
+			PlayerID:       "player-parallel-b",
+			InitialBalance: domain.NewMoney(10000, domain.BRL),
+		},
+	)
+	if err != nil {
+		t.Fatalf("create wallet B: %v", err)
+	}
+
+	// Independent pools/services simulate requests handled by
+	// different application instances.
+	poolA, err := pgxpool.New(ctx, databaseURL)
+	if err != nil {
+		t.Fatalf("connect instance A: %v", err)
+	}
+	defer poolA.Close()
+
+	poolB, err := pgxpool.New(ctx, databaseURL)
+	if err != nil {
+		t.Fatalf("connect instance B: %v", err)
+	}
+	defer poolB.Close()
+
+	serviceA := NewService(poolA)
+	serviceB := NewService(poolB)
+
+	commandA := ProcessCommand{
+		IdempotencyKey: "parallel-wallet-a",
+		Request: domain.WagerRequest{
+			ProviderID:            "provider-a",
+			ExternalTransactionID: "external-parallel-a",
+			PlayerID:              "player-parallel-a",
+			WalletID:              walletA.WalletID,
+			RoundID:               "round-parallel-a",
+			GameID:                "game-1",
+			Kind:                  domain.WagerKindBet,
+			Amount:                domain.NewMoney(3000, domain.BRL),
+		},
+	}
+
+	commandB := ProcessCommand{
+		IdempotencyKey: "parallel-wallet-b",
+		Request: domain.WagerRequest{
+			ProviderID:            "provider-a",
+			ExternalTransactionID: "external-parallel-b",
+			PlayerID:              "player-parallel-b",
+			WalletID:              walletB.WalletID,
+			RoundID:               "round-parallel-b",
+			GameID:                "game-1",
+			Kind:                  domain.WagerKindBet,
+			Amount:                domain.NewMoney(4000, domain.BRL),
+		},
+	}
+
+	type outcome struct {
+		name   string
+		result ProcessResult
+		err    error
+	}
+
+	start := make(chan struct{})
+	outcomes := make(chan outcome, 2)
+
+	var wg sync.WaitGroup
+	wg.Add(2)
+
+	go func() {
+		defer wg.Done()
+		<-start
+
+		result, err := serviceA.Process(ctx, commandA)
+		outcomes <- outcome{
+			name:   "wallet A",
+			result: result,
+			err:    err,
+		}
+	}()
+
+	go func() {
+		defer wg.Done()
+		<-start
+
+		result, err := serviceB.Process(ctx, commandB)
+		outcomes <- outcome{
+			name:   "wallet B",
+			result: result,
+			err:    err,
+		}
+	}()
+
+	close(start)
+
+	wg.Wait()
+	close(outcomes)
+
+	for outcome := range outcomes {
+		if outcome.err != nil {
+			t.Fatalf("%s processing failed: %v", outcome.name, outcome.err)
+		}
+
+		if outcome.result.State != domain.WagerStateProcessed {
+			t.Fatalf(
+				"%s expected PROCESSED, got %s",
+				outcome.name,
+				outcome.result.State,
+			)
+		}
+	}
+
+	var balanceA int64
+	var versionA int64
+
+	err = setupPool.QueryRow(
+		ctx,
+		`
+		SELECT balance, version
+		FROM wallets
+		WHERE id = $1
+		`,
+		walletA.WalletID,
+	).Scan(&balanceA, &versionA)
+	if err != nil {
+		t.Fatalf("query wallet A: %v", err)
+	}
+
+	var balanceB int64
+	var versionB int64
+
+	err = setupPool.QueryRow(
+		ctx,
+		`
+		SELECT balance, version
+		FROM wallets
+		WHERE id = $1
+		`,
+		walletB.WalletID,
+	).Scan(&balanceB, &versionB)
+	if err != nil {
+		t.Fatalf("query wallet B: %v", err)
+	}
+
+	if balanceA != 7000 {
+		t.Fatalf("expected wallet A balance 7000, got %d", balanceA)
+	}
+
+	if balanceB != 6000 {
+		t.Fatalf("expected wallet B balance 6000, got %d", balanceB)
+	}
+
+	if versionA != 2 {
+		t.Fatalf("expected wallet A version 2, got %d", versionA)
+	}
+
+	if versionB != 2 {
+		t.Fatalf("expected wallet B version 2, got %d", versionB)
+	}
+
+	var debitCountA int
+
+	err = setupPool.QueryRow(
+		ctx,
+		`
+		SELECT COUNT(*)
+		FROM ledger_entries
+		WHERE wallet_id = $1
+		  AND direction = 'DEBIT'
+		`,
+		walletA.WalletID,
+	).Scan(&debitCountA)
+	if err != nil {
+		t.Fatalf("count wallet A debits: %v", err)
+	}
+
+	var debitCountB int
+
+	err = setupPool.QueryRow(
+		ctx,
+		`
+		SELECT COUNT(*)
+		FROM ledger_entries
+		WHERE wallet_id = $1
+		  AND direction = 'DEBIT'
+		`,
+		walletB.WalletID,
+	).Scan(&debitCountB)
+	if err != nil {
+		t.Fatalf("count wallet B debits: %v", err)
+	}
+
+	if debitCountA != 1 {
+		t.Fatalf(
+			"expected exactly 1 debit for wallet A, got %d",
+			debitCountA,
+		)
+	}
+
+	if debitCountB != 1 {
+		t.Fatalf(
+			"expected exactly 1 debit for wallet B, got %d",
+			debitCountB,
 		)
 	}
 }

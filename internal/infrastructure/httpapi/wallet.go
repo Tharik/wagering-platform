@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"net/http"
+	"strconv"
 
 	"github.com/Tharik/wagering-platform/internal/application/wallet"
 	"github.com/Tharik/wagering-platform/internal/domain"
@@ -50,6 +51,11 @@ type ledgerEntryResponse struct {
 	BalanceBefore string `json:"balanceBefore"`
 	BalanceAfter  string `json:"balanceAfter"`
 	CreatedAt     string `json:"createdAt"`
+}
+
+type ledgerResponse struct {
+	Entries    []ledgerEntryResponse `json:"entries"`
+	NextCursor string                `json:"nextCursor,omitempty"`
 }
 
 type reconciliationResponse struct {
@@ -203,9 +209,29 @@ func (h *WalletHandler) Ledger(
 	w http.ResponseWriter,
 	r *http.Request,
 ) {
-	entries, err := h.service.Ledger(
+	limit := wallet.DefaultLedgerPageSize
+
+	if rawLimit := r.URL.Query().Get("limit"); rawLimit != "" {
+		parsedLimit, err := strconv.Atoi(rawLimit)
+		if err != nil || parsedLimit <= 0 {
+			writeJSON(
+				w,
+				http.StatusBadRequest,
+				map[string]string{
+					"error": "invalid limit",
+				},
+			)
+			return
+		}
+
+		limit = parsedLimit
+	}
+
+	page, err := h.service.LedgerPage(
 		r.Context(),
 		r.PathValue("id"),
+		limit,
+		r.URL.Query().Get("cursor"),
 	)
 
 	if errors.Is(err, wallet.ErrWalletNotFound) {
@@ -214,6 +240,17 @@ func (h *WalletHandler) Ledger(
 			http.StatusNotFound,
 			map[string]string{
 				"error": "wallet not found",
+			},
+		)
+		return
+	}
+
+	if errors.Is(err, wallet.ErrInvalidLedgerCursor) {
+		writeJSON(
+			w,
+			http.StatusBadRequest,
+			map[string]string{
+				"error": "invalid cursor",
 			},
 		)
 		return
@@ -230,15 +267,15 @@ func (h *WalletHandler) Ledger(
 		return
 	}
 
-	response := make(
+	responseEntries := make(
 		[]ledgerEntryResponse,
 		0,
-		len(entries),
+		len(page.Entries),
 	)
 
-	for _, entry := range entries {
-		response = append(
-			response,
+	for _, entry := range page.Entries {
+		responseEntries = append(
+			responseEntries,
 			ledgerEntryResponse{
 				ID:            entry.ID,
 				TransactionID: entry.TransactionID,
@@ -265,7 +302,10 @@ func (h *WalletHandler) Ledger(
 	writeJSON(
 		w,
 		http.StatusOK,
-		response,
+		ledgerResponse{
+			Entries:    responseEntries,
+			NextCursor: page.NextCursor,
+		},
 	)
 }
 

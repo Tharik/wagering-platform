@@ -679,6 +679,285 @@ func TestPendingRollbackIsProcessedWhenReferenceArrivesLater(t *testing.T) {
 	}
 }
 
+func TestPendingReferenceSurvivesApplicationRestart(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+
+	const databaseURL = "postgres://wagering:wagering@localhost:5432/wagering?sslmode=disable"
+
+	// First application instance.
+	firstPool, err := pgxpool.New(ctx, databaseURL)
+	if err != nil {
+		t.Fatalf("connect first application instance: %v", err)
+	}
+
+	cleanDatabase(t, ctx, firstPool)
+
+	createdWallet, err := wallet.NewService(firstPool).Create(
+		ctx,
+		wallet.CreateWalletCommand{
+			PlayerID:       "player-restart",
+			InitialBalance: domain.NewMoney(10000, domain.BRL),
+		},
+	)
+	if err != nil {
+		firstPool.Close()
+		t.Fatalf("create wallet: %v", err)
+	}
+
+	firstService := NewService(firstPool)
+
+	// ROLLBACK arrives before its BET.
+	pendingResult, err := firstService.Process(
+		ctx,
+		ProcessCommand{
+			IdempotencyKey: "rollback-before-restart",
+			Request: domain.WagerRequest{
+				ProviderID:                     "provider-a",
+				ExternalTransactionID:          "rollback-before-restart-1",
+				PlayerID:                       "player-restart",
+				WalletID:                       createdWallet.WalletID,
+				RoundID:                        "round-restart",
+				GameID:                         "game-1",
+				Kind:                           domain.WagerKindRollback,
+				Amount:                         domain.NewMoney(3000, domain.BRL),
+				ReferenceExternalTransactionID: "bet-after-restart-1",
+			},
+		},
+	)
+	if err != nil {
+		firstPool.Close()
+		t.Fatalf("create pending ROLLBACK: %v", err)
+	}
+
+	if pendingResult.State != domain.WagerStatePendingReference {
+		firstPool.Close()
+		t.Fatalf(
+			"expected PENDING_REFERENCE, got %s",
+			pendingResult.State,
+		)
+	}
+
+	pendingTransactionID := pendingResult.TransactionID
+
+	// Simulate the application stopping completely.
+	// From this point on, neither the original Service nor its pool is reused.
+	firstPool.Close()
+
+	// Second application instance starts with a completely new connection pool.
+	secondPool, err := pgxpool.New(ctx, databaseURL)
+	if err != nil {
+		t.Fatalf("connect restarted application instance: %v", err)
+	}
+	defer secondPool.Close()
+
+	secondService := NewService(secondPool)
+
+	// The referenced BET arrives after the restart.
+	betResult, err := secondService.Process(
+		ctx,
+		ProcessCommand{
+			IdempotencyKey: "bet-after-restart",
+			Request: domain.WagerRequest{
+				ProviderID:            "provider-a",
+				ExternalTransactionID: "bet-after-restart-1",
+				PlayerID:              "player-restart",
+				WalletID:              createdWallet.WalletID,
+				RoundID:               "round-restart",
+				GameID:                "game-1",
+				Kind:                  domain.WagerKindBet,
+				Amount:                domain.NewMoney(3000, domain.BRL),
+			},
+		},
+	)
+	if err != nil {
+		t.Fatalf("process BET after restart: %v", err)
+	}
+
+	if betResult.State != domain.WagerStateProcessed {
+		t.Fatalf(
+			"expected BET PROCESSED, got %s",
+			betResult.State,
+		)
+	}
+
+	if betResult.Balance.Amount() != 7000 {
+		t.Fatalf(
+			"expected balance 7000 after BET, got %d",
+			betResult.Balance.Amount(),
+		)
+	}
+
+	// Make the persisted pending transaction immediately eligible for retry.
+	_, err = secondPool.Exec(
+		ctx,
+		`
+		UPDATE wager_transactions
+		SET reference_next_attempt_at = NOW()
+		WHERE id = $1
+		`,
+		pendingTransactionID,
+	)
+	if err != nil {
+		t.Fatalf("make pending transaction due: %v", err)
+	}
+
+	// A brand-new resolver, created after the simulated restart,
+	// must discover the pending work exclusively from PostgreSQL.
+	resolver := NewPendingReferenceResolver(secondPool)
+
+	handled, err := resolver.ResolveOne(ctx)
+	if err != nil {
+		t.Fatalf("resolve pending reference after restart: %v", err)
+	}
+
+	if !handled {
+		t.Fatal("expected restarted resolver to discover persisted pending transaction")
+	}
+
+	var (
+		state                   string
+		referencedTransactionID string
+		resultBalance           int64
+		failureCode             *string
+	)
+
+	err = secondPool.QueryRow(
+		ctx,
+		`
+		SELECT
+			state,
+			referenced_transaction_id::text,
+			result_balance,
+			failure_code
+		FROM wager_transactions
+		WHERE id = $1
+		`,
+		pendingTransactionID,
+	).Scan(
+		&state,
+		&referencedTransactionID,
+		&resultBalance,
+		&failureCode,
+	)
+	if err != nil {
+		t.Fatalf("query recovered pending transaction: %v", err)
+	}
+
+	if state != string(domain.WagerStateProcessed) {
+		t.Fatalf(
+			"expected recovered transaction PROCESSED, got %s",
+			state,
+		)
+	}
+
+	if referencedTransactionID != betResult.TransactionID {
+		t.Fatalf(
+			"expected reference %s, got %s",
+			betResult.TransactionID,
+			referencedTransactionID,
+		)
+	}
+
+	if resultBalance != 10000 {
+		t.Fatalf(
+			"expected recovered result balance 10000, got %d",
+			resultBalance,
+		)
+	}
+
+	if failureCode != nil {
+		t.Fatalf(
+			"expected no failure code, got %s",
+			*failureCode,
+		)
+	}
+
+	var balance int64
+	var version int64
+
+	err = secondPool.QueryRow(
+		ctx,
+		`
+		SELECT balance, version
+		FROM wallets
+		WHERE id = $1
+		`,
+		createdWallet.WalletID,
+	).Scan(&balance, &version)
+	if err != nil {
+		t.Fatalf("query wallet after recovery: %v", err)
+	}
+
+	if balance != 10000 {
+		t.Fatalf(
+			"expected final balance 10000, got %d",
+			balance,
+		)
+	}
+
+	if version != 3 {
+		t.Fatalf(
+			"expected wallet version 3, got %d",
+			version,
+		)
+	}
+
+	var ledgerCount int
+
+	err = secondPool.QueryRow(
+		ctx,
+		`
+		SELECT COUNT(*)
+		FROM ledger_entries
+		WHERE transaction_id = $1
+		`,
+		pendingTransactionID,
+	).Scan(&ledgerCount)
+	if err != nil {
+		t.Fatalf("count recovered ROLLBACK ledger entries: %v", err)
+	}
+
+	if ledgerCount != 1 {
+		t.Fatalf(
+			"expected exactly 1 recovered ROLLBACK ledger entry, got %d",
+			ledgerCount,
+		)
+	}
+
+	// Running the resolver again must not repeat the financial movement.
+	handled, err = resolver.ResolveOne(ctx)
+	if err != nil {
+		t.Fatalf("second resolver call after restart: %v", err)
+	}
+
+	if handled {
+		t.Fatal("expected recovered transaction not to be processed twice")
+	}
+
+	var finalLedgerCount int
+
+	err = secondPool.QueryRow(
+		ctx,
+		`
+		SELECT COUNT(*)
+		FROM ledger_entries
+		WHERE transaction_id = $1
+		`,
+		pendingTransactionID,
+	).Scan(&finalLedgerCount)
+	if err != nil {
+		t.Fatalf("count final recovered ledger entries: %v", err)
+	}
+
+	if finalLedgerCount != 1 {
+		t.Fatalf(
+			"expected recovery to move money exactly once, got %d ledger entries",
+			finalLedgerCount,
+		)
+	}
+}
+
 func TestPendingReferenceSchedulesRetryWhenReferenceStillDoesNotExist(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()

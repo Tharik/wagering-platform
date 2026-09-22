@@ -21,6 +21,26 @@ func NewServer(
 	auth *AuthMiddleware,
 	logger *slog.Logger,
 ) *Server {
+	return NewServerWithAddress(
+		walletHandler,
+		wagerHandler,
+		healthHandler,
+		metricsHandler,
+		auth,
+		logger,
+		":8080",
+	)
+}
+
+func NewServerWithAddress(
+	walletHandler *WalletHandler,
+	wagerHandler *WagerHandler,
+	healthHandler *HealthHandler,
+	metricsHandler *MetricsHandler,
+	auth *AuthMiddleware,
+	logger *slog.Logger,
+	address string,
+) *Server {
 	mux := http.NewServeMux()
 
 	// Internal wallet operations.
@@ -107,7 +127,7 @@ func NewServer(
 			slog.String("component", "http_server"),
 		),
 		server: &http.Server{
-			Addr:    ":8080",
+			Addr:    address,
 			Handler: mux,
 		},
 	}

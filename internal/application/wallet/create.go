@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/Tharik/wagering-platform/internal/domain"
+	"github.com/Tharik/wagering-platform/internal/observability"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -24,12 +25,24 @@ type CreateWalletResult struct {
 }
 
 type Service struct {
-	pool *pgxpool.Pool
+	pool    *pgxpool.Pool
+	metrics *observability.Metrics
 }
 
 func NewService(pool *pgxpool.Pool) *Service {
 	return &Service{
-		pool: pool,
+		pool:    pool,
+		metrics: observability.NewMetrics(),
+	}
+}
+
+func NewServiceWithMetrics(
+	pool *pgxpool.Pool,
+	metrics *observability.Metrics,
+) *Service {
+	return &Service{
+		pool:    pool,
+		metrics: metrics,
 	}
 }
 
