@@ -16,13 +16,17 @@ import (
 	wageringapp "github.com/Tharik/wagering-platform/internal/application/wagering"
 	walletapp "github.com/Tharik/wagering-platform/internal/application/wallet"
 	"github.com/Tharik/wagering-platform/internal/observability"
+	"github.com/aws/aws-sdk-go-v2/aws"
+	"github.com/aws/aws-sdk-go-v2/credentials"
+	"github.com/aws/aws-sdk-go-v2/service/sqs"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
 const (
-	testDatabaseURL = "postgres://wagering:wagering@localhost:5432/wagering?sslmode=disable"
-	testOIDCIssuer  = "http://localhost:8081/realms/wagering"
-	testTokenURL    = testOIDCIssuer + "/protocol/openid-connect/token"
+	testDatabaseURL      = "postgres://wagering:wagering@localhost:5432/wagering?sslmode=disable"
+	testOIDCIssuer       = "http://localhost:8081/realms/wagering"
+	testTokenURL         = testOIDCIssuer + "/protocol/openid-connect/token"
+	testCommandsQueueURL = "http://sqs.us-east-1.localhost.localstack.cloud:4566/000000000000/wager-transactions.fifo"
 )
 
 func TestOIDCAuthenticationAndProviderIsolation(t *testing.T) {
@@ -51,7 +55,24 @@ func TestOIDCAuthenticationAndProviderIsolation(t *testing.T) {
 
 	walletHandler := NewWalletHandler(walletService)
 	wagerHandler := NewWagerHandler(wagerService)
-	healthHandler := NewHealthHandler(pool)
+
+	sqsClient := sqs.New(sqs.Options{
+		Region: "us-east-1",
+		Credentials: aws.NewCredentialsCache(
+			credentials.NewStaticCredentialsProvider(
+				"test",
+				"test",
+				"",
+			),
+		),
+		BaseEndpoint: aws.String("http://localhost:4566"),
+	})
+
+	healthHandler := NewHealthHandler(
+		pool,
+		sqsClient,
+		testCommandsQueueURL,
+	)
 
 	metrics := observability.NewMetrics()
 	metricsHandler := NewMetricsHandler(metrics)

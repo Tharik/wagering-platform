@@ -61,7 +61,7 @@ func main() {
 
 			httpapi.NewWalletHandler,
 			httpapi.NewWagerHandler,
-			httpapi.NewHealthHandler,
+			newHealthHandler,
 			httpapi.NewServer,
 			httpapi.NewMetricsHandler,
 
@@ -179,6 +179,18 @@ func newSQSClient(
 	}
 
 	return awssqs.New(options)
+}
+
+func newHealthHandler(
+	pool *pgxpool.Pool,
+	client *awssqs.Client,
+	cfg config,
+) *httpapi.HealthHandler {
+	return httpapi.NewHealthHandler(
+		pool,
+		client,
+		cfg.CommandsQueueURL,
+	)
 }
 
 func newSQSConsumer(
