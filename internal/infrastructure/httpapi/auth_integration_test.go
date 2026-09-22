@@ -114,6 +114,76 @@ func TestOIDCAuthenticationAndProviderIsolation(t *testing.T) {
 		"provider-b-secret",
 	)
 
+	t.Run("wallet create rejects invalid nested amount", func(t *testing.T) {
+		response := doRequest(
+			t,
+			ctx,
+			http.MethodPost,
+			testServer.URL+"/wallets",
+			internalToken,
+			map[string]any{
+				"playerId": "player-invalid-amount",
+				"initialBalance": map[string]any{
+					"amount":   "10.001",
+					"currency": "BRL",
+				},
+			},
+		)
+		defer response.Body.Close()
+
+		if response.StatusCode != http.StatusBadRequest {
+			t.Fatalf("expected 400, got %d: %s", response.StatusCode, readBody(t, response))
+		}
+
+		var result map[string]string
+		decodeJSON(t, response, &result)
+		if result["error"] != "invalid initial balance" {
+			t.Fatalf("expected invalid initial balance error, got %q", result["error"])
+		}
+	})
+
+	t.Run("wallet create rejects unsupported currency", func(t *testing.T) {
+		response := doRequest(
+			t,
+			ctx,
+			http.MethodPost,
+			testServer.URL+"/wallets",
+			internalToken,
+			map[string]any{
+				"playerId": "player-unsupported-currency",
+				"initialBalance": map[string]any{
+					"amount":   "10.00",
+					"currency": "USD",
+				},
+			},
+		)
+		defer response.Body.Close()
+
+		if response.StatusCode != http.StatusBadRequest {
+			t.Fatalf("expected 400, got %d: %s", response.StatusCode, readBody(t, response))
+		}
+	})
+
+	t.Run("wallet create rejects old flat money fields", func(t *testing.T) {
+		response := doRequest(
+			t,
+			ctx,
+			http.MethodPost,
+			testServer.URL+"/wallets",
+			internalToken,
+			map[string]any{
+				"playerId":       "player-old-wallet-contract",
+				"initialBalance": "10.00",
+				"currency":       "BRL",
+			},
+		)
+		defer response.Body.Close()
+
+		if response.StatusCode != http.StatusBadRequest {
+			t.Fatalf("expected 400, got %d: %s", response.StatusCode, readBody(t, response))
+		}
+	})
+
 	t.Run("wallet endpoint rejects missing token", func(t *testing.T) {
 		response := doRequest(
 			t,
@@ -178,9 +248,11 @@ func TestOIDCAuthenticationAndProviderIsolation(t *testing.T) {
 
 	t.Run("internal client can create wallet", func(t *testing.T) {
 		body := map[string]any{
-			"playerId":       "player-auth-integration",
-			"initialBalance": "100.00",
-			"currency":       "BRL",
+			"playerId": "player-auth-integration",
+			"initialBalance": map[string]any{
+				"amount":   "100.00",
+				"currency": "BRL",
+			},
 		}
 
 		response := doRequest(
@@ -202,16 +274,140 @@ func TestOIDCAuthenticationAndProviderIsolation(t *testing.T) {
 		}
 
 		var result struct {
-			WalletID string `json:"walletId"`
+			ID       string `json:"id"`
+			PlayerID string `json:"playerId"`
+			Balance  struct {
+				Amount   string `json:"amount"`
+				Currency string `json:"currency"`
+			} `json:"balance"`
+			Version int64 `json:"version"`
 		}
 
 		decodeJSON(t, response, &result)
 
-		if result.WalletID == "" {
-			t.Fatal("expected walletId")
+		if result.ID == "" {
+			t.Fatal("expected id")
+		}
+		if result.PlayerID != "player-auth-integration" {
+			t.Fatalf("expected playerId player-auth-integration, got %s", result.PlayerID)
+		}
+		if result.Balance.Amount != "100.00" || result.Balance.Currency != "BRL" {
+			t.Fatalf("unexpected nested balance: %+v", result.Balance)
+		}
+		if result.Version != 1 {
+			t.Fatalf("expected version 1, got %d", result.Version)
 		}
 
-		walletID = result.WalletID
+		walletID = result.ID
+	})
+
+	t.Run("internal client reads aligned wallet resource", func(t *testing.T) {
+		response := doRequest(
+			t,
+			ctx,
+			http.MethodGet,
+			testServer.URL+"/wallets/"+walletID,
+			internalToken,
+			nil,
+		)
+		defer response.Body.Close()
+
+		if response.StatusCode != http.StatusOK {
+			t.Fatalf("expected 200, got %d: %s", response.StatusCode, readBody(t, response))
+		}
+
+		var result struct {
+			ID       string `json:"id"`
+			PlayerID string `json:"playerId"`
+			Balance  struct {
+				Amount   string `json:"amount"`
+				Currency string `json:"currency"`
+			} `json:"balance"`
+			Version int64 `json:"version"`
+		}
+		decodeJSON(t, response, &result)
+
+		if result.ID != walletID || result.PlayerID != "player-auth-integration" {
+			t.Fatalf("unexpected wallet identity: %+v", result)
+		}
+		if result.Balance.Amount != "100.00" || result.Balance.Currency != "BRL" {
+			t.Fatalf("unexpected nested balance: %+v", result.Balance)
+		}
+		if result.Version != 1 {
+			t.Fatalf("expected version 1, got %d", result.Version)
+		}
+	})
+
+	t.Run("positive opening balance preserves opening effects", func(t *testing.T) {
+		var openingCount int
+		var ledgerCount int
+		var outboxCount int
+
+		if err := pool.QueryRow(ctx, `SELECT COUNT(*) FROM wager_transactions WHERE wallet_id = $1 AND kind = 'OPENING'`, walletID).Scan(&openingCount); err != nil {
+			t.Fatalf("count opening transactions: %v", err)
+		}
+		if err := pool.QueryRow(ctx, `SELECT COUNT(*) FROM ledger_entries WHERE wallet_id = $1`, walletID).Scan(&ledgerCount); err != nil {
+			t.Fatalf("count opening ledger entries: %v", err)
+		}
+		if err := pool.QueryRow(ctx, `SELECT COUNT(*) FROM outbox_events WHERE aggregate_id = $1`, walletID).Scan(&outboxCount); err != nil {
+			t.Fatalf("count opening outbox events: %v", err)
+		}
+
+		if openingCount != 1 || ledgerCount != 1 || outboxCount != 2 {
+			t.Fatalf("unexpected opening effects: transactions=%d ledger=%d outbox=%d", openingCount, ledgerCount, outboxCount)
+		}
+	})
+
+	t.Run("zero initial balance creates no opening effects", func(t *testing.T) {
+		response := doRequest(
+			t,
+			ctx,
+			http.MethodPost,
+			testServer.URL+"/wallets",
+			internalToken,
+			map[string]any{
+				"playerId": "player-zero-balance",
+				"initialBalance": map[string]any{
+					"amount":   "0.00",
+					"currency": "BRL",
+				},
+			},
+		)
+		defer response.Body.Close()
+
+		if response.StatusCode != http.StatusCreated {
+			t.Fatalf("expected 201, got %d: %s", response.StatusCode, readBody(t, response))
+		}
+
+		var result struct {
+			ID      string `json:"id"`
+			Balance struct {
+				Amount string `json:"amount"`
+			} `json:"balance"`
+			Version int64 `json:"version"`
+		}
+		decodeJSON(t, response, &result)
+
+		if result.Balance.Amount != "0.00" || result.Version != 1 {
+			t.Fatalf("unexpected zero-balance response: %+v", result)
+		}
+
+		var openingCount int
+		var ledgerCount int
+		var outboxCount int
+		if err := pool.QueryRow(ctx, `SELECT COUNT(*) FROM wager_transactions WHERE wallet_id = $1`, result.ID).Scan(&openingCount); err != nil {
+			t.Fatalf("count zero-balance transactions: %v", err)
+		}
+		if err := pool.QueryRow(ctx, `SELECT COUNT(*) FROM ledger_entries WHERE wallet_id = $1`, result.ID).Scan(&ledgerCount); err != nil {
+			t.Fatalf("count zero-balance ledger entries: %v", err)
+		}
+		if err := pool.QueryRow(ctx, `SELECT COUNT(*) FROM outbox_events WHERE aggregate_id = $1`, result.ID).Scan(&outboxCount); err != nil {
+			t.Fatalf("count zero-balance outbox events: %v", err)
+		}
+
+		if openingCount != 0 || ledgerCount != 0 || outboxCount != 0 {
+			t.Fatalf("unexpected zero-balance effects: transactions=%d ledger=%d outbox=%d", openingCount, ledgerCount, outboxCount)
+		}
 	})
 
 	t.Run("internal client cannot access provider wager endpoint", func(t *testing.T) {

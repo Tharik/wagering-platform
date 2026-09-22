@@ -230,9 +230,11 @@ func createPaginationWalletHTTP(
 		baseURL+"/wallets",
 		token,
 		map[string]any{
-			"playerId":       "player-ledger-http-pagination",
-			"initialBalance": "100.00",
-			"currency":       "BRL",
+			"playerId": "player-ledger-http-pagination",
+			"initialBalance": map[string]any{
+				"amount":   "100.00",
+				"currency": "BRL",
+			},
 		},
 	)
 	defer response.Body.Close()
@@ -246,16 +248,16 @@ func createPaginationWalletHTTP(
 	}
 
 	var result struct {
-		WalletID string `json:"walletId"`
+		ID string `json:"id"`
 	}
 
 	decodeJSON(t, response, &result)
 
-	if result.WalletID == "" {
-		t.Fatal("create wallet: expected walletId")
+	if result.ID == "" {
+		t.Fatal("create wallet: expected id")
 	}
 
-	return result.WalletID
+	return result.ID
 }
 
 func createPaginationBetHTTP(

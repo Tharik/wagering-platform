@@ -115,9 +115,11 @@ func TestSameWagerAcrossHTTPAndSQSIsProcessedExactlyOnce(t *testing.T) {
 		testServer.URL+"/wallets",
 		internalToken,
 		map[string]any{
-			"playerId":       "player-cross-channel",
-			"initialBalance": "100.00",
-			"currency":       "BRL",
+			"playerId": "player-cross-channel",
+			"initialBalance": map[string]any{
+				"amount":   "100.00",
+				"currency": "BRL",
+			},
 		},
 	)
 	defer createWalletResponse.Body.Close()
@@ -131,15 +133,15 @@ func TestSameWagerAcrossHTTPAndSQSIsProcessedExactlyOnce(t *testing.T) {
 	}
 
 	var walletResult struct {
-		WalletID string `json:"walletId"`
+		ID string `json:"id"`
 	}
 
 	if err := json.NewDecoder(createWalletResponse.Body).Decode(&walletResult); err != nil {
 		t.Fatalf("decode wallet response: %v", err)
 	}
 
-	if walletResult.WalletID == "" {
-		t.Fatal("expected walletId")
+	if walletResult.ID == "" {
+		t.Fatal("expected wallet id")
 	}
 
 	idempotencyKey := "cross-channel-idempotency-" + uuid.NewString()
@@ -156,7 +158,7 @@ func TestSameWagerAcrossHTTPAndSQSIsProcessedExactlyOnce(t *testing.T) {
 			"providerId":            "provider-a",
 			"externalTransactionId": externalTransactionID,
 			"playerId":              "player-cross-channel",
-			"walletId":              walletResult.WalletID,
+			"walletId":              walletResult.ID,
 			"roundId":               "round-cross-channel",
 			"gameId":                "game-cross-channel",
 			"kind":                  "BET",
@@ -198,7 +200,7 @@ func TestSameWagerAcrossHTTPAndSQSIsProcessedExactlyOnce(t *testing.T) {
 			ProviderID:            "provider-a",
 			ExternalTransactionID: externalTransactionID,
 			PlayerID:              "player-cross-channel",
-			WalletID:              walletResult.WalletID,
+			WalletID:              walletResult.ID,
 			RoundID:               "round-cross-channel",
 			GameID:                "game-cross-channel",
 			Kind:                  "BET",
@@ -219,7 +221,7 @@ func TestSameWagerAcrossHTTPAndSQSIsProcessedExactlyOnce(t *testing.T) {
 		&awssqs.SendMessageInput{
 			QueueUrl:               aws.String(crossChannelQueueURL),
 			MessageBody:            aws.String(string(payload)),
-			MessageGroupId:         aws.String(walletResult.WalletID),
+			MessageGroupId:         aws.String(walletResult.ID),
 			MessageDeduplicationId: aws.String(command.MessageID),
 		},
 	)
@@ -274,7 +276,7 @@ func TestSameWagerAcrossHTTPAndSQSIsProcessedExactlyOnce(t *testing.T) {
 		FROM wallets
 		WHERE id = $1
 		`,
-		walletResult.WalletID,
+		walletResult.ID,
 	).Scan(&balance, &version)
 	if err != nil {
 		t.Fatalf("query final wallet: %v", err)

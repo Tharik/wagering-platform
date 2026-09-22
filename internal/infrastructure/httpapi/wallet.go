@@ -23,24 +23,15 @@ func NewWalletHandler(
 }
 
 type createWalletRequest struct {
-	PlayerID       string `json:"playerId"`
-	InitialBalance string `json:"initialBalance"`
-	Currency       string `json:"currency"`
-}
-
-type createWalletResponse struct {
-	WalletID string `json:"walletId"`
-	Balance  string `json:"balance"`
-	Currency string `json:"currency"`
-	Version  int64  `json:"version"`
+	PlayerID       string   `json:"playerId"`
+	InitialBalance moneyDTO `json:"initialBalance"`
 }
 
 type walletResponse struct {
-	WalletID string `json:"walletId"`
-	PlayerID string `json:"playerId"`
-	Balance  string `json:"balance"`
-	Currency string `json:"currency"`
-	Version  int64  `json:"version"`
+	ID       string   `json:"id"`
+	PlayerID string   `json:"playerId"`
+	Balance  moneyDTO `json:"balance"`
+	Version  int64    `json:"version"`
 }
 
 type ledgerEntryResponse struct {
@@ -98,7 +89,7 @@ func (h *WalletHandler) Create(
 		return
 	}
 
-	currency := domain.Currency(request.Currency)
+	currency := domain.Currency(request.InitialBalance.Currency)
 
 	if currency != domain.BRL {
 		writeJSON(
@@ -112,7 +103,7 @@ func (h *WalletHandler) Create(
 	}
 
 	initialBalance, err := domain.ParseMoney(
-		request.InitialBalance,
+		request.InitialBalance.Amount,
 		currency,
 	)
 	if err != nil {
@@ -147,11 +138,14 @@ func (h *WalletHandler) Create(
 	writeJSON(
 		w,
 		http.StatusCreated,
-		createWalletResponse{
-			WalletID: result.WalletID,
-			Balance:  result.Balance.String(),
-			Currency: string(result.Balance.Currency()),
-			Version:  result.Version,
+		walletResponse{
+			ID:       result.WalletID,
+			PlayerID: request.PlayerID,
+			Balance: moneyDTO{
+				Amount:   result.Balance.String(),
+				Currency: string(result.Balance.Currency()),
+			},
+			Version: result.Version,
 		},
 	)
 }
@@ -196,11 +190,13 @@ func (h *WalletHandler) Get(
 		w,
 		http.StatusOK,
 		walletResponse{
-			WalletID: result.WalletID,
+			ID:       result.WalletID,
 			PlayerID: result.PlayerID,
-			Balance:  money.String(),
-			Currency: result.Currency,
-			Version:  result.Version,
+			Balance: moneyDTO{
+				Amount:   money.String(),
+				Currency: result.Currency,
+			},
+			Version: result.Version,
 		},
 	)
 }
