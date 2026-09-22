@@ -342,7 +342,10 @@ func registerLifecycle(
 
 				cancel = workerCancel
 
-				httpServer.Start()
+				if err := httpServer.Start(); err != nil {
+					workerCancel()
+					return err
+				}
 
 				workers.Add(4)
 

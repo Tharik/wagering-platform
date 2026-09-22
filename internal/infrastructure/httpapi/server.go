@@ -3,7 +3,9 @@ package httpapi
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log/slog"
+	"net"
 	"net/http"
 )
 
@@ -137,14 +139,23 @@ func (s *Server) Handler() http.Handler {
 	return s.handler
 }
 
-func (s *Server) Start() {
-	go func() {
-		s.logger.Info(
-			"server started",
-			slog.String("address", s.server.Addr),
+func (s *Server) Start() error {
+	listener, err := net.Listen("tcp", s.server.Addr)
+	if err != nil {
+		return fmt.Errorf(
+			"listen on %s: %w",
+			s.server.Addr,
+			err,
 		)
+	}
 
-		if err := s.server.ListenAndServe(); err != nil &&
+	s.logger.Info(
+		"server started",
+		slog.String("address", s.server.Addr),
+	)
+
+	go func() {
+		if err := s.server.Serve(listener); err != nil &&
 			!errors.Is(err, http.ErrServerClosed) {
 			s.logger.Error(
 				"server failed",
@@ -152,6 +163,8 @@ func (s *Server) Start() {
 			)
 		}
 	}()
+
+	return nil
 }
 
 func (s *Server) Shutdown(
