@@ -28,6 +28,7 @@ const (
 	defaultSQSEndpoint = "http://localhost:4566"
 
 	defaultCommandsQueueURL = "http://sqs.us-east-1.localhost.localstack.cloud:4566/000000000000/wager-transactions.fifo"
+	defaultCommandsDLQURL   = "http://sqs.us-east-1.localhost.localstack.cloud:4566/000000000000/wager-transactions-dlq.fifo"
 	defaultEventsQueueURL   = "http://sqs.us-east-1.localhost.localstack.cloud:4566/000000000000/wager-events.fifo"
 
 	defaultOIDCIssuer = "http://localhost:8081/realms/wagering"
@@ -38,6 +39,7 @@ type config struct {
 	AWSRegion        string
 	SQSEndpoint      string
 	CommandsQueueURL string
+	CommandsDLQURL   string
 	EventsQueueURL   string
 	OIDCIssuer       string
 }
@@ -68,6 +70,7 @@ func main() {
 			newSQSConsumer,
 			newSQSPublisher,
 			newOutboxPublisher,
+			newDLQMonitor,
 
 			newConsumerWorker,
 			newOutboxWorker,
@@ -96,6 +99,10 @@ func loadConfig() config {
 		CommandsQueueURL: envOrDefault(
 			"SQS_COMMANDS_QUEUE_URL",
 			defaultCommandsQueueURL,
+		),
+		CommandsDLQURL: envOrDefault(
+			"SQS_COMMANDS_DLQ_URL",
+			defaultCommandsDLQURL,
 		),
 		EventsQueueURL: envOrDefault(
 			"SQS_EVENTS_QUEUE_URL",
@@ -229,6 +236,20 @@ func newOutboxPublisher(
 	)
 }
 
+func newDLQMonitor(
+	client *awssqs.Client,
+	cfg config,
+	metrics *observability.Metrics,
+	logger *slog.Logger,
+) *messagingsqs.DLQMonitor {
+	return messagingsqs.NewDLQMonitor(
+		client,
+		cfg.CommandsDLQURL,
+		metrics,
+		logger,
+	)
+}
+
 func newConsumerWorker(
 	consumer *messagingsqs.Consumer,
 	logger *slog.Logger,
@@ -268,6 +289,7 @@ func registerLifecycle(
 	consumerWorker *worker.ConsumerWorker,
 	outboxWorker *worker.OutboxWorker,
 	pendingReferenceWorker *worker.PendingReferenceWorker,
+	dlqMonitor *messagingsqs.DLQMonitor,
 	httpServer *httpapi.Server,
 ) {
 	var cancel context.CancelFunc
@@ -283,7 +305,7 @@ func registerLifecycle(
 
 				httpServer.Start()
 
-				workers.Add(3)
+				workers.Add(4)
 
 				go func() {
 					defer workers.Done()
@@ -298,6 +320,11 @@ func registerLifecycle(
 				go func() {
 					defer workers.Done()
 					pendingReferenceWorker.Run(workerContext)
+				}()
+
+				go func() {
+					defer workers.Done()
+					dlqMonitor.Run(workerContext)
 				}()
 
 				return nil

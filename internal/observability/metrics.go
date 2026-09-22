@@ -48,8 +48,8 @@ func (m *Metrics) IncSQSRetries() {
 	m.sqsRetries.Add(1)
 }
 
-func (m *Metrics) IncSQSDLQMessages() {
-	m.sqsDLQMessages.Add(1)
+func (m *Metrics) SetSQSDLQMessages(count uint64) {
+	m.sqsDLQMessages.Store(count)
 }
 
 func (m *Metrics) IncOutboxEventsPublished(count uint64) {
@@ -124,10 +124,6 @@ func (m *Metrics) WritePrometheus(w io.Writer) error {
 			m.sqsRetries.Load(),
 		},
 		{
-			"wagering_sqs_dlq_messages_total",
-			m.sqsDLQMessages.Load(),
-		},
-		{
 			"wagering_outbox_events_published_total",
 			m.outboxEventsPublished.Load(),
 		},
@@ -175,6 +171,15 @@ func (m *Metrics) WritePrometheus(w io.Writer) error {
 		); err != nil {
 			return err
 		}
+	}
+
+	if _, err := fmt.Fprintf(
+		w,
+		"# TYPE wagering_sqs_dlq_messages gauge\n"+
+			"wagering_sqs_dlq_messages %d\n",
+		m.sqsDLQMessages.Load(),
+	); err != nil {
+		return err
 	}
 
 	processingCount := m.processingCount.Load()
