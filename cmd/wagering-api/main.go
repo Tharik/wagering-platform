@@ -218,10 +218,12 @@ func newSQSClient(
 func newWalletService(
 	pool *pgxpool.Pool,
 	metrics *observability.Metrics,
+	logger *slog.Logger,
 ) *wallet.Service {
-	return wallet.NewServiceWithMetrics(
+	return wallet.NewServiceWithMetricsAndLogger(
 		pool,
 		metrics,
+		logger,
 	)
 }
 

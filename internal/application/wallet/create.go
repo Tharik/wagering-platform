@@ -4,6 +4,8 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
+	"log/slog"
 	"time"
 
 	"github.com/Tharik/wagering-platform/internal/domain"
@@ -27,12 +29,14 @@ type CreateWalletResult struct {
 type Service struct {
 	pool    *pgxpool.Pool
 	metrics *observability.Metrics
+	logger  *slog.Logger
 }
 
 func NewService(pool *pgxpool.Pool) *Service {
 	return &Service{
 		pool:    pool,
 		metrics: observability.NewMetrics(),
+		logger:  newDiscardLogger(),
 	}
 }
 
@@ -43,7 +47,24 @@ func NewServiceWithMetrics(
 	return &Service{
 		pool:    pool,
 		metrics: metrics,
+		logger:  newDiscardLogger(),
 	}
+}
+
+func NewServiceWithMetricsAndLogger(
+	pool *pgxpool.Pool,
+	metrics *observability.Metrics,
+	logger *slog.Logger,
+) *Service {
+	return &Service{
+		pool:    pool,
+		metrics: metrics,
+		logger:  logger,
+	}
+}
+
+func newDiscardLogger() *slog.Logger {
+	return slog.New(slog.NewTextHandler(io.Discard, nil))
 }
 
 func (s *Service) Create(

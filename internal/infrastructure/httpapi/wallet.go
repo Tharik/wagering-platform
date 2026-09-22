@@ -50,12 +50,12 @@ type ledgerResponse struct {
 }
 
 type reconciliationResponse struct {
-	WalletID      string `json:"walletId"`
-	Currency      string `json:"currency"`
-	WalletBalance string `json:"walletBalance"`
-	LedgerBalance string `json:"ledgerBalance"`
-	EntryCount    int    `json:"entryCount"`
-	Consistent    bool   `json:"consistent"`
+	WalletID          string   `json:"walletId"`
+	StoredBalance     moneyDTO `json:"storedBalance"`
+	CalculatedBalance moneyDTO `json:"calculatedBalance"`
+	Difference        moneyDTO `json:"difference"`
+	Consistent        bool     `json:"consistent"`
+	CheckedEntries    int      `json:"checkedEntries"`
 }
 
 func (h *WalletHandler) Create(
@@ -343,17 +343,29 @@ func (h *WalletHandler) Reconcile(
 		http.StatusOK,
 		reconciliationResponse{
 			WalletID: result.WalletID,
-			Currency: result.Currency,
-			WalletBalance: domain.NewMoney(
-				result.WalletBalance,
-				currency,
-			).String(),
-			LedgerBalance: domain.NewMoney(
-				result.LedgerBalance,
-				currency,
-			).String(),
-			EntryCount: result.EntryCount,
-			Consistent: result.Consistent,
+			StoredBalance: moneyDTO{
+				Amount: domain.NewMoney(
+					result.StoredBalance,
+					currency,
+				).String(),
+				Currency: result.Currency,
+			},
+			CalculatedBalance: moneyDTO{
+				Amount: domain.NewMoney(
+					result.CalculatedBalance,
+					currency,
+				).String(),
+				Currency: result.Currency,
+			},
+			Difference: moneyDTO{
+				Amount: domain.NewMoney(
+					result.Difference,
+					currency,
+				).String(),
+				Currency: result.Currency,
+			},
+			Consistent:     result.Consistent,
+			CheckedEntries: result.CheckedEntries,
 		},
 	)
 }

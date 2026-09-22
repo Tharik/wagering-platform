@@ -358,6 +358,73 @@ func TestOIDCAuthenticationAndProviderIsolation(t *testing.T) {
 		}
 	})
 
+	t.Run("internal client receives official reconciliation contract", func(t *testing.T) {
+		response := doRequest(
+			t,
+			ctx,
+			http.MethodPost,
+			testServer.URL+"/wallets/"+walletID+"/reconciliation",
+			internalToken,
+			nil,
+		)
+		defer response.Body.Close()
+
+		if response.StatusCode != http.StatusOK {
+			t.Fatalf("expected 200, got %d: %s", response.StatusCode, readBody(t, response))
+		}
+
+		payload, err := io.ReadAll(response.Body)
+		if err != nil {
+			t.Fatalf("read reconciliation response: %v", err)
+		}
+		var fields map[string]json.RawMessage
+		if err := json.Unmarshal(payload, &fields); err != nil {
+			t.Fatalf("decode reconciliation fields: %v", err)
+		}
+		expectedFields := []string{
+			"walletId",
+			"storedBalance",
+			"calculatedBalance",
+			"difference",
+			"consistent",
+			"checkedEntries",
+		}
+		if len(fields) != len(expectedFields) {
+			t.Fatalf("unexpected reconciliation fields: %s", payload)
+		}
+		for _, field := range expectedFields {
+			if _, ok := fields[field]; !ok {
+				t.Fatalf("missing reconciliation field %s: %s", field, payload)
+			}
+		}
+
+		var result struct {
+			WalletID          string   `json:"walletId"`
+			StoredBalance     moneyDTO `json:"storedBalance"`
+			CalculatedBalance moneyDTO `json:"calculatedBalance"`
+			Difference        moneyDTO `json:"difference"`
+			Consistent        bool     `json:"consistent"`
+			CheckedEntries    int      `json:"checkedEntries"`
+		}
+		if err := json.Unmarshal(payload, &result); err != nil {
+			t.Fatalf("decode reconciliation response: %v", err)
+		}
+		if result.WalletID != walletID || !result.Consistent || result.CheckedEntries != 1 {
+			t.Fatalf("unexpected reconciliation response: %+v", result)
+		}
+		for name, money := range map[string]moneyDTO{
+			"storedBalance":     result.StoredBalance,
+			"calculatedBalance": result.CalculatedBalance,
+		} {
+			if money.Amount != "100.00" || money.Currency != "BRL" {
+				t.Fatalf("unexpected %s: %+v", name, money)
+			}
+		}
+		if result.Difference.Amount != "0.00" || result.Difference.Currency != "BRL" {
+			t.Fatalf("unexpected difference: %+v", result.Difference)
+		}
+	})
+
 	t.Run("zero initial balance creates no opening effects", func(t *testing.T) {
 		response := doRequest(
 			t,
