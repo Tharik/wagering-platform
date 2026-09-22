@@ -299,30 +299,27 @@ The behavior was tested by:
 
 ---
 
-## 12. Pending-reference correlation trade-off
+## 12. Pending-reference correlation continuity
 
 Incoming HTTP and SQS operations carry correlation information used for observability and event propagation.
 
-For ordinary synchronous processing, this correlation information can be propagated into the generated events.
+When a reversal enters `PENDING_REFERENCE`, its original `correlationId` and optional `causationId` are persisted with the wager transaction in PostgreSQL together with the durable retry state.
 
-The current implementation does **not persist the original correlation/causation identifiers with a transaction while it remains in `PENDING_REFERENCE`**.
+The pending-reference resolver loads those persisted identifiers when it later resolves or rejects the transaction.
 
-When the background resolver later resolves or rejects that transaction, it generates a new correlation identifier for that asynchronous processing cycle.
+As a result, asynchronous completion preserves the original tracing context across:
 
-This is an intentional scope trade-off in the current implementation.
+- retry delays;
+- application restarts;
+- execution by a different application instance;
+- successful reference resolution;
+- reference expiry and rejection.
 
-It does **not** affect:
+The final `WagerTransactionProcessed` or `WagerTransactionRejected` event therefore retains the correlation context of the operation that originally created the pending transaction rather than creating an unrelated tracing chain.
 
-- wallet correctness;
-- financial atomicity;
-- ledger integrity;
-- transaction idempotency;
-- reversal uniqueness;
-- retry/restart safety.
+This behavior is covered by integration tests that persist a pending reversal, recreate the application/database context, resolve or expire the transaction, and verify the correlation metadata in the resulting Outbox event.
 
-It does reduce end-to-end observability across the asynchronous pending-reference boundary.
-
-A production evolution would persist the original `correlationId` and `causationId` with the pending transaction and propagate them when the resolver emits its final events.
+The database columns supporting this behavior are introduced by migration `000005_pending_reference_correlation`.
 
 ---
 
@@ -742,14 +739,6 @@ This keeps ownership semantics simple and safe for the challenge but can keep da
 A higher-throughput production design could introduce explicit claim/lease state so network publication occurs outside the claim transaction.
 
 That design would require additional lease-expiry and crash-recovery semantics.
-
-### Pending-reference correlation
-
-The original correlation/causation identifiers are not persisted across the pending-reference lifecycle.
-
-The resolver creates a new correlation ID when asynchronous resolution occurs.
-
-Persisting and propagating the original IDs would improve end-to-end tracing and is a natural production improvement.
 
 ### Development infrastructure
 

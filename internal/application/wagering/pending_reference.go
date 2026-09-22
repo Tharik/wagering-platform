@@ -24,7 +24,6 @@ func persistPendingReference(
 	now time.Time,
 ) (ProcessResult, error) {
 	transactionID := uuid.New()
-
 	nextAttemptAt := now.Add(referenceRetryDelay)
 	expiresAt := now.Add(referenceTTL)
 
@@ -50,6 +49,8 @@ func persistPendingReference(
 			reference_attempts,
 			reference_next_attempt_at,
 			reference_expires_at,
+			correlation_id,
+			causation_id,
 			created_at,
 			updated_at
 		)
@@ -59,7 +60,8 @@ func persistPendingReference(
 			$10, 'PENDING_REFERENCE',
 			$11, $12, $13, $14,
 			0, $15, $16,
-			$17, $17
+			$17, $18,
+			$19, $19
 		)
 		`,
 		transactionID,
@@ -78,6 +80,8 @@ func persistPendingReference(
 		currentBalance.Amount(),
 		nextAttemptAt,
 		expiresAt,
+		cmd.CorrelationID,
+		nullableString(cmd.CausationID),
 		now,
 	)
 	if err != nil {
@@ -135,4 +139,11 @@ func insertPendingReferenceEvent(
 	}
 
 	return nil
+}
+
+func nullableString(value string) any {
+	if value == "" {
+		return nil
+	}
+	return value
 }

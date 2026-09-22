@@ -79,8 +79,6 @@ func (r *PendingReferenceResolver) ResolveOne(
 	}
 
 	now := time.Now().UTC()
-	correlationID := uuid.NewString()
-
 	// TTL is terminal. Once expired, the transaction must never move money.
 	if pending.ReferenceExpiresAt != nil &&
 		!now.Before(*pending.ReferenceExpiresAt) {
@@ -363,8 +361,8 @@ func (r *PendingReferenceResolver) ResolveOne(
 		pending.Request.Amount,
 		balanceBefore,
 		ledgerDirection,
-		correlationID,
-		"",
+		pending.CorrelationID,
+		pending.CausationID,
 		now,
 	); err != nil {
 		return false, err
@@ -387,6 +385,8 @@ type pendingReferenceTransaction struct {
 	Request            domain.WagerRequest
 	ReferenceAttempts  int
 	ReferenceExpiresAt *time.Time
+	CorrelationID      string
+	CausationID        string
 }
 
 func findDuePendingReference(
@@ -418,7 +418,9 @@ func findDuePendingReference(
 			currency,
 			reference_external_transaction_id,
 			reference_attempts,
-			reference_expires_at
+			reference_expires_at,
+			COALESCE(correlation_id, ''),
+			COALESCE(causation_id, '')
 		FROM wager_transactions
 		WHERE state = 'PENDING_REFERENCE'
 		  AND (
@@ -443,6 +445,8 @@ func findDuePendingReference(
 		&pending.Request.ReferenceExternalTransactionID,
 		&pending.ReferenceAttempts,
 		&pending.ReferenceExpiresAt,
+		&pending.CorrelationID,
+		&pending.CausationID,
 	)
 
 	if errors.Is(err, pgx.ErrNoRows) {
@@ -600,8 +604,8 @@ func rejectPendingReference(
 		tx,
 		pending.ID,
 		"WagerTransactionRejected",
-		uuid.NewString(),
-		"",
+		pending.CorrelationID,
+		pending.CausationID,
 		map[string]any{
 			"transactionId": pending.ID.String(),
 			"walletId":      wallet.ID,

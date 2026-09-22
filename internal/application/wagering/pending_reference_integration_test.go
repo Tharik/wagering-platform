@@ -40,6 +40,8 @@ func TestMissingReferenceCreatesPendingReferenceWithoutMovingMoney(t *testing.T)
 
 	cmd := ProcessCommand{
 		IdempotencyKey: "rollback-before-bet",
+		CorrelationID:  "correlation-pending-persisted",
+		CausationID:    "message-pending-persisted",
 		Request: domain.WagerRequest{
 			ProviderID:                     "provider-a",
 			ExternalTransactionID:          "rollback-before-bet-1",
@@ -84,6 +86,8 @@ func TestMissingReferenceCreatesPendingReferenceWithoutMovingMoney(t *testing.T)
 		referenceAttempts       int
 		referenceNextAttemptAt  *time.Time
 		referenceExpiresAt      *time.Time
+		correlationID           string
+		causationID             string
 	)
 
 	err = pool.QueryRow(
@@ -96,7 +100,9 @@ func TestMissingReferenceCreatesPendingReferenceWithoutMovingMoney(t *testing.T)
 			result_balance,
 			reference_attempts,
 			reference_next_attempt_at,
-			reference_expires_at
+			reference_expires_at,
+			correlation_id,
+			causation_id
 		FROM wager_transactions
 		WHERE id = $1
 		`,
@@ -109,6 +115,8 @@ func TestMissingReferenceCreatesPendingReferenceWithoutMovingMoney(t *testing.T)
 		&referenceAttempts,
 		&referenceNextAttemptAt,
 		&referenceExpiresAt,
+		&correlationID,
+		&causationID,
 	)
 	if err != nil {
 		t.Fatalf("query pending transaction: %v", err)
@@ -159,6 +167,13 @@ func TestMissingReferenceCreatesPendingReferenceWithoutMovingMoney(t *testing.T)
 
 	if !referenceExpiresAt.After(*referenceNextAttemptAt) {
 		t.Fatal("expected reference expiration after next retry")
+	}
+
+	if correlationID != cmd.CorrelationID {
+		t.Fatalf("expected persisted correlation ID %q, got %q", cmd.CorrelationID, correlationID)
+	}
+	if causationID != cmd.CausationID {
+		t.Fatalf("expected persisted causation ID %q, got %q", cmd.CausationID, causationID)
 	}
 
 	// No financial movement may occur while the transaction is pending.
@@ -712,6 +727,8 @@ func TestPendingReferenceSurvivesApplicationRestart(t *testing.T) {
 		ctx,
 		ProcessCommand{
 			IdempotencyKey: "rollback-before-restart",
+			CorrelationID:  "correlation-before-restart",
+			CausationID:    "message-before-restart",
 			Request: domain.WagerRequest{
 				ProviderID:                     "provider-a",
 				ExternalTransactionID:          "rollback-before-restart-1",
@@ -923,6 +940,28 @@ func TestPendingReferenceSurvivesApplicationRestart(t *testing.T) {
 			"expected exactly 1 recovered ROLLBACK ledger entry, got %d",
 			ledgerCount,
 		)
+	}
+
+	var processedCorrelationID string
+	var processedCausationID string
+	err = secondPool.QueryRow(
+		ctx,
+		`
+		SELECT payload->>'correlationId', payload->>'causationId'
+		FROM outbox_events
+		WHERE aggregate_id = $1
+		  AND event_type = 'WagerTransactionProcessed'
+		`,
+		pendingTransactionID,
+	).Scan(&processedCorrelationID, &processedCausationID)
+	if err != nil {
+		t.Fatalf("query recovered processed event tracing metadata: %v", err)
+	}
+	if processedCorrelationID != "correlation-before-restart" {
+		t.Fatalf("expected processed event correlation ID after restart to be preserved, got %q", processedCorrelationID)
+	}
+	if processedCausationID != "message-before-restart" {
+		t.Fatalf("expected processed event causation ID after restart to be preserved, got %q", processedCausationID)
 	}
 
 	// Running the resolver again must not repeat the financial movement.
@@ -1182,6 +1221,8 @@ func TestPendingReferenceExpiresWithoutMovingMoney(t *testing.T) {
 		ctx,
 		ProcessCommand{
 			IdempotencyKey: "expired-reference-1",
+			CorrelationID:  "correlation-expired-reference",
+			CausationID:    "message-expired-reference",
 			Request: domain.WagerRequest{
 				ProviderID:                     "provider-a",
 				ExternalTransactionID:          "rollback-expired-1",
@@ -1354,5 +1395,27 @@ func TestPendingReferenceExpiresWithoutMovingMoney(t *testing.T) {
 			"expected exactly 1 rejected event, got %d",
 			rejectedEventCount,
 		)
+	}
+
+	var rejectedCorrelationID string
+	var rejectedCausationID string
+	err = pool.QueryRow(
+		ctx,
+		`
+		SELECT payload->>'correlationId', payload->>'causationId'
+		FROM outbox_events
+		WHERE aggregate_id = $1
+		  AND event_type = 'WagerTransactionRejected'
+		`,
+		result.TransactionID,
+	).Scan(&rejectedCorrelationID, &rejectedCausationID)
+	if err != nil {
+		t.Fatalf("query rejected event tracing metadata: %v", err)
+	}
+	if rejectedCorrelationID != "correlation-expired-reference" {
+		t.Fatalf("expected rejected event correlation ID to be preserved, got %q", rejectedCorrelationID)
+	}
+	if rejectedCausationID != "message-expired-reference" {
+		t.Fatalf("expected rejected event causation ID to be preserved, got %q", rejectedCausationID)
 	}
 }
