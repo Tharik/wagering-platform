@@ -80,6 +80,8 @@ func persistRejectedTransaction(
 		tx,
 		transactionID,
 		"WagerTransactionRejected",
+		cmd.CorrelationID,
+		cmd.CausationID,
 		map[string]any{
 			"transactionId": transactionID.String(),
 			"walletId":      wallet.ID,
@@ -109,6 +111,8 @@ func insertProcessedEvents(
 	amount domain.Money,
 	balanceBefore domain.Money,
 	direction string,
+	correlationID string,
+	causationID string,
 	now time.Time,
 ) error {
 	if err := insertOutboxEvent(
@@ -116,6 +120,8 @@ func insertProcessedEvents(
 		tx,
 		transactionID,
 		"WagerTransactionProcessed",
+		correlationID,
+		causationID,
 		map[string]any{
 			"transactionId": transactionID.String(),
 			"walletId":      wallet.ID,
@@ -136,6 +142,8 @@ func insertProcessedEvents(
 		tx,
 		transactionID,
 		"WalletBalanceChanged",
+		correlationID,
+		causationID,
 		map[string]any{
 			"walletId":      wallet.ID,
 			"transactionId": transactionID.String(),
@@ -159,18 +167,25 @@ func insertOutboxEvent(
 	tx pgx.Tx,
 	aggregateID uuid.UUID,
 	eventType string,
+	correlationID string,
+	causationID string,
 	data map[string]any,
 	now time.Time,
 ) error {
 	eventID := uuid.New()
 
 	envelope := map[string]any{
-		"eventId":     eventID.String(),
-		"eventType":   eventType,
-		"aggregateId": aggregateID.String(),
-		"occurredAt":  now.Format(time.RFC3339Nano),
-		"version":     1,
-		"data":        data,
+		"eventId":       eventID.String(),
+		"eventType":     eventType,
+		"aggregateId":   aggregateID.String(),
+		"correlationId": correlationID,
+		"occurredAt":    now.Format(time.RFC3339Nano),
+		"version":       1,
+		"data":          data,
+	}
+
+	if causationID != "" {
+		envelope["causationId"] = causationID
 	}
 
 	payload, err := json.Marshal(envelope)

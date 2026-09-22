@@ -23,6 +23,8 @@ var (
 
 type ProcessCommand struct {
 	IdempotencyKey string
+	CorrelationID  string
+	CausationID    string
 	Request        domain.WagerRequest
 }
 
@@ -106,6 +108,10 @@ func (s *Service) ProcessTx(
 ) (ProcessResult, error) {
 	if cmd.IdempotencyKey == "" {
 		return ProcessResult{}, errors.New("idempotency key is required")
+	}
+
+	if cmd.CorrelationID == "" {
+		cmd.CorrelationID = uuid.NewString()
 	}
 
 	if !cmd.Request.Kind.IsValidExternalKind() {
@@ -498,6 +504,8 @@ func (s *Service) ProcessTx(
 		cmd.Request.Amount,
 		balanceBefore,
 		eventDirection,
+		cmd.CorrelationID,
+		cmd.CausationID,
 		now,
 	); err != nil {
 		return ProcessResult{}, err

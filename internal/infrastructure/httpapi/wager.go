@@ -8,6 +8,7 @@ import (
 
 	"github.com/Tharik/wagering-platform/internal/application/wagering"
 	"github.com/Tharik/wagering-platform/internal/domain"
+	"github.com/google/uuid"
 )
 
 type WagerHandler struct {
@@ -147,6 +148,7 @@ func (h *WagerHandler) Process(
 
 	command := wagering.ProcessCommand{
 		IdempotencyKey: request.IdempotencyKey,
+		CorrelationID:  uuid.NewString(),
 		Request: domain.WagerRequest{
 			ProviderID:                     principal.ClientID,
 			ExternalTransactionID:          request.ExternalTransactionID,

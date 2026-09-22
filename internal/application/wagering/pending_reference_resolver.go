@@ -79,6 +79,7 @@ func (r *PendingReferenceResolver) ResolveOne(
 	}
 
 	now := time.Now().UTC()
+	correlationID := uuid.NewString()
 
 	// TTL is terminal. Once expired, the transaction must never move money.
 	if pending.ReferenceExpiresAt != nil &&
@@ -362,6 +363,8 @@ func (r *PendingReferenceResolver) ResolveOne(
 		pending.Request.Amount,
 		balanceBefore,
 		ledgerDirection,
+		correlationID,
+		"",
 		now,
 	); err != nil {
 		return false, err
@@ -597,6 +600,8 @@ func rejectPendingReference(
 		tx,
 		pending.ID,
 		"WagerTransactionRejected",
+		uuid.NewString(),
+		"",
 		map[string]any{
 			"transactionId": pending.ID.String(),
 			"walletId":      wallet.ID,

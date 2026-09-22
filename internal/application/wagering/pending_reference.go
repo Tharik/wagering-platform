@@ -112,7 +112,6 @@ func insertPendingReferenceEvent(
 	now time.Time,
 ) error {
 	payload := map[string]any{
-		"eventType":                      "WagerTransactionPendingReference",
 		"transactionId":                  transactionID.String(),
 		"providerId":                     cmd.Request.ProviderID,
 		"externalTransactionId":          cmd.Request.ExternalTransactionID,
@@ -124,6 +123,8 @@ func insertPendingReferenceEvent(
 		tx,
 		transactionID,
 		"WagerTransactionPendingReference",
+		cmd.CorrelationID,
+		cmd.CausationID,
 		payload,
 		now,
 	); err != nil {

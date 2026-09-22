@@ -179,6 +179,8 @@ func (c *Consumer) processMessage(
 			RawPayload:   rawPayload,
 			Command: wagering.ProcessCommand{
 				IdempotencyKey: command.Data.IdempotencyKey,
+				CorrelationID:  command.MessageID,
+				CausationID:    command.MessageID,
 				Request: domain.WagerRequest{
 					ProviderID:                     command.Data.ProviderID,
 					ExternalTransactionID:          command.Data.ExternalTransactionID,

@@ -2,6 +2,7 @@ package wallet
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"time"
 
@@ -47,6 +48,7 @@ func (s *Service) Create(
 
 	now := time.Now().UTC()
 	walletID := uuid.New()
+	correlationID := uuid.NewString()
 	currency := string(cmd.InitialBalance.Currency())
 
 	_, err = tx.Exec(
@@ -82,6 +84,7 @@ func (s *Service) Create(
 			walletID,
 			cmd.PlayerID,
 			cmd.InitialBalance,
+			correlationID,
 			now,
 		); err != nil {
 			return CreateWalletResult{}, err
@@ -105,6 +108,7 @@ func createOpeningTransaction(
 	walletID uuid.UUID,
 	playerID string,
 	initialBalance domain.Money,
+	correlationID string,
 	now time.Time,
 ) error {
 	transactionID := uuid.New()
@@ -178,14 +182,14 @@ func createOpeningTransaction(
 	if err := insertOutboxEvent(
 		ctx,
 		tx,
-		uuid.New(),
 		walletID,
 		"WagerTransactionProcessed",
-		fmt.Sprintf(
-			`{"transactionId":%q,"walletId":%q,"kind":"OPENING"}`,
-			transactionID.String(),
-			walletID.String(),
-		),
+		correlationID,
+		map[string]any{
+			"transactionId": transactionID.String(),
+			"walletId":      walletID.String(),
+			"kind":          "OPENING",
+		},
 		now,
 	); err != nil {
 		return err
@@ -194,16 +198,19 @@ func createOpeningTransaction(
 	if err := insertOutboxEvent(
 		ctx,
 		tx,
-		uuid.New(),
 		walletID,
 		"WalletBalanceChanged",
-		fmt.Sprintf(
-			`{"walletId":%q,"transactionId":%q,"direction":"CREDIT","amount":%q,"balanceBefore":"0.00","balanceAfter":%q,"walletVersion":1}`,
-			walletID.String(),
-			transactionID.String(),
-			initialBalance.String(),
-			initialBalance.String(),
-		),
+		correlationID,
+		map[string]any{
+			"walletId":      walletID.String(),
+			"transactionId": transactionID.String(),
+			"direction":     "CREDIT",
+			"amount":        initialBalance.String(),
+			"currency":      string(initialBalance.Currency()),
+			"balanceBefore": "0.00",
+			"balanceAfter":  initialBalance.String(),
+			"walletVersion": int64(1),
+		},
 		now,
 	); err != nil {
 		return err
@@ -215,13 +222,30 @@ func createOpeningTransaction(
 func insertOutboxEvent(
 	ctx context.Context,
 	tx pgx.Tx,
-	eventID uuid.UUID,
 	aggregateID uuid.UUID,
 	eventType string,
-	payload string,
+	correlationID string,
+	data map[string]any,
 	now time.Time,
 ) error {
-	_, err := tx.Exec(
+	eventID := uuid.New()
+
+	envelope := map[string]any{
+		"eventId":       eventID.String(),
+		"eventType":     eventType,
+		"aggregateId":   aggregateID.String(),
+		"correlationId": correlationID,
+		"occurredAt":    now.Format(time.RFC3339Nano),
+		"version":       1,
+		"data":          data,
+	}
+
+	payload, err := json.Marshal(envelope)
+	if err != nil {
+		return fmt.Errorf("marshal outbox event: %w", err)
+	}
+
+	_, err = tx.Exec(
 		ctx,
 		`
 		INSERT INTO outbox_events (
