@@ -191,7 +191,7 @@ func TestSameWagerAcrossHTTPAndSQSIsProcessedExactlyOnce(t *testing.T) {
 	// Second delivery: exactly the same logical wager through SQS.
 	command := sqsmessaging.CommandMessage{
 		MessageID:  "cross-channel-message-" + uuid.NewString(),
-		Type:       "WAGER_TRANSACTION",
+		Type:       "WagerTransactionRequested",
 		OccurredAt: time.Now().UTC().Format(time.RFC3339),
 		Data: sqsmessaging.WagerCommandData{
 			IdempotencyKey:        idempotencyKey,
@@ -202,8 +202,10 @@ func TestSameWagerAcrossHTTPAndSQSIsProcessedExactlyOnce(t *testing.T) {
 			RoundID:               "round-cross-channel",
 			GameID:                "game-cross-channel",
 			Kind:                  "BET",
-			Amount:                "30.00",
-			Currency:              "BRL",
+			Money: sqsmessaging.MoneyDTO{
+				Amount:   "30.00",
+				Currency: "BRL",
+			},
 		},
 	}
 

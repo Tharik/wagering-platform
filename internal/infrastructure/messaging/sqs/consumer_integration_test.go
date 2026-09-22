@@ -21,6 +21,100 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
+func TestDecodeCommandValidatesOfficialContract(t *testing.T) {
+	valid := CommandMessage{
+		MessageID:  "msg-123",
+		Type:       wagerTransactionRequestedType,
+		OccurredAt: "2026-09-08T12:00:00.000Z",
+		Data: WagerCommandData{
+			ProviderID:            "provider-a",
+			ExternalTransactionID: "transaction-123",
+			IdempotencyKey:        "provider-a:transaction-123",
+			PlayerID:              "player-id",
+			WalletID:              "wallet-id",
+			RoundID:               "round-987",
+			GameID:                "fortune-chimp",
+			Kind:                  "BET",
+			Money: MoneyDTO{
+				Amount:   "25.00",
+				Currency: "BRL",
+			},
+		},
+	}
+
+	payload, err := json.Marshal(valid)
+	if err != nil {
+		t.Fatalf("marshal valid command: %v", err)
+	}
+
+	decoded, err := decodeCommand(payload)
+	if err != nil {
+		t.Fatalf("decode valid official command: %v", err)
+	}
+	if decoded.money.Amount() != 2500 || decoded.money.Currency() != domain.BRL {
+		t.Fatalf("unexpected decoded money: %s %s", decoded.money.String(), decoded.money.Currency())
+	}
+
+	tests := []struct {
+		name          string
+		mutate        func(*CommandMessage)
+		expectedError string
+	}{
+		{
+			name: "missing type",
+			mutate: func(command *CommandMessage) {
+				command.Type = ""
+			},
+			expectedError: "type is required",
+		},
+		{
+			name: "unsupported type",
+			mutate: func(command *CommandMessage) {
+				command.Type = "WAGER_TRANSACTION"
+			},
+			expectedError: "unsupported message type",
+		},
+		{
+			name: "missing nested money",
+			mutate: func(command *CommandMessage) {
+				command.Data.Money = MoneyDTO{}
+			},
+			expectedError: "money.amount is required",
+		},
+		{
+			name: "invalid money",
+			mutate: func(command *CommandMessage) {
+				command.Data.Money.Amount = "not-money"
+			},
+			expectedError: "parse amount",
+		},
+		{
+			name: "missing providerId",
+			mutate: func(command *CommandMessage) {
+				command.Data.ProviderID = ""
+			},
+			expectedError: "providerId is required",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			command := valid
+			tt.mutate(&command)
+
+			payload, err := json.Marshal(command)
+			if err != nil {
+				t.Fatalf("marshal command: %v", err)
+			}
+
+			_, err = decodeCommand(payload)
+			if err == nil || !strings.Contains(err.Error(), tt.expectedError) {
+				t.Fatalf("expected error containing %q, got %v", tt.expectedError, err)
+			}
+		})
+	}
+}
+
 func TestConsumerProcessesBetFromSQSAndDeletesMessage(t *testing.T) {
 	ctx, cancel := context.WithTimeout(
 		context.Background(),
@@ -58,7 +152,7 @@ func TestConsumerProcessesBetFromSQSAndDeletesMessage(t *testing.T) {
 	)
 	command := CommandMessage{
 		MessageID:  "sqs-message-" + uuid.NewString(),
-		Type:       "WAGER_TRANSACTION",
+		Type:       wagerTransactionRequestedType,
 		OccurredAt: time.Now().UTC().Format(time.RFC3339),
 		Data: WagerCommandData{
 			IdempotencyKey:        "sqs-idempotency-" + uuid.NewString(),
@@ -69,8 +163,10 @@ func TestConsumerProcessesBetFromSQSAndDeletesMessage(t *testing.T) {
 			RoundID:               "round-sqs-1",
 			GameID:                "game-1",
 			Kind:                  "BET",
-			Amount:                "30.00",
-			Currency:              "BRL",
+			Money: MoneyDTO{
+				Amount:   "30.00",
+				Currency: "BRL",
+			},
 		},
 	}
 	payload, err := json.Marshal(command)
@@ -263,7 +359,7 @@ func TestConsumerDoesNotProcessBetAgainWhenDeleteFailsAfterCommit(t *testing.T) 
 	)
 	command := CommandMessage{
 		MessageID:  "sqs-redelivery-message-" + uuid.NewString(),
-		Type:       "WAGER_TRANSACTION",
+		Type:       wagerTransactionRequestedType,
 		OccurredAt: time.Now().UTC().Format(time.RFC3339),
 		Data: WagerCommandData{
 			IdempotencyKey:        "sqs-redelivery-idempotency-" + uuid.NewString(),
@@ -274,8 +370,10 @@ func TestConsumerDoesNotProcessBetAgainWhenDeleteFailsAfterCommit(t *testing.T) 
 			RoundID:               "round-sqs-redelivery",
 			GameID:                "game-1",
 			Kind:                  "BET",
-			Amount:                "30.00",
-			Currency:              "BRL",
+			Money: MoneyDTO{
+				Amount:   "30.00",
+				Currency: "BRL",
+			},
 		},
 	}
 	payload, err := json.Marshal(command)
@@ -492,7 +590,7 @@ func TestConsumerRetriesInvalidMessageAndMovesItToDLQ(t *testing.T) {
 	)
 	command := CommandMessage{
 		MessageID:  "sqs-invalid-" + uuid.NewString(),
-		Type:       "WAGER_TRANSACTION",
+		Type:       wagerTransactionRequestedType,
 		OccurredAt: time.Now().UTC().Format(time.RFC3339),
 		Data: WagerCommandData{
 			IdempotencyKey:        "sqs-invalid-idempotency-" + uuid.NewString(),
@@ -503,9 +601,8 @@ func TestConsumerRetriesInvalidMessageAndMovesItToDLQ(t *testing.T) {
 			RoundID:               "round-sqs-dlq",
 			GameID:                "game-1",
 			Kind:                  "BET",
-			Amount:                "10.00",
-			// Currency intentionally omitted.
-			// decodeCommand must fail and the message must not be deleted.
+			// Money intentionally omitted. decodeCommand must fail and the
+			// message must remain available for retry and eventual redrive.
 		},
 	}
 	payload, err := json.Marshal(command)

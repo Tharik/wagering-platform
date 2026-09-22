@@ -27,7 +27,10 @@ import (
 	awstypes "github.com/aws/aws-sdk-go-v2/service/sqs/types"
 )
 
-const defaultConsumerName = "wager-transactions"
+const (
+	defaultConsumerName           = "wager-transactions"
+	wagerTransactionRequestedType = "WagerTransactionRequested"
+)
 
 type ConsumerClient interface {
 	ReceiveMessage(
@@ -101,11 +104,15 @@ type WagerCommandData struct {
 
 	Kind string `json:"kind"`
 
+	Money MoneyDTO `json:"money"`
+
+	ReferenceExternalTransactionID string `json:"referenceExternalTransactionId,omitempty"`
+}
+
+type MoneyDTO struct {
 	Amount string `json:"amount"`
 
 	Currency string `json:"currency"`
-
-	ReferenceExternalTransactionID string `json:"referenceExternalTransactionId,omitempty"`
 }
 
 func NewConsumer(
@@ -447,6 +454,17 @@ func decodeCommand(payload []byte) (decodedCommand, error) {
 
 	}
 
+	if message.Type != wagerTransactionRequestedType {
+
+		return decodedCommand{}, fmt.Errorf(
+
+			"unsupported message type: %s",
+
+			message.Type,
+		)
+
+	}
+
 	if message.OccurredAt == "" {
 
 		return decodedCommand{}, errors.New(
@@ -465,6 +483,24 @@ func decodeCommand(payload []byte) (decodedCommand, error) {
 
 	}
 
+	if message.Data.ProviderID == "" {
+
+		return decodedCommand{}, errors.New(
+
+			"providerId is required",
+		)
+
+	}
+
+	if message.Data.ExternalTransactionID == "" {
+
+		return decodedCommand{}, errors.New(
+
+			"externalTransactionId is required",
+		)
+
+	}
+
 	if message.Data.IdempotencyKey == "" {
 
 		return decodedCommand{}, errors.New(
@@ -474,16 +510,70 @@ func decodeCommand(payload []byte) (decodedCommand, error) {
 
 	}
 
-	if message.Data.Currency == "" {
+	if message.Data.PlayerID == "" {
 
 		return decodedCommand{}, errors.New(
 
-			"currency is required",
+			"playerId is required",
 		)
 
 	}
 
-	currency := domain.Currency(message.Data.Currency)
+	if message.Data.WalletID == "" {
+
+		return decodedCommand{}, errors.New(
+
+			"walletId is required",
+		)
+
+	}
+
+	if message.Data.RoundID == "" {
+
+		return decodedCommand{}, errors.New(
+
+			"roundId is required",
+		)
+
+	}
+
+	if message.Data.GameID == "" {
+
+		return decodedCommand{}, errors.New(
+
+			"gameId is required",
+		)
+
+	}
+
+	if message.Data.Kind == "" {
+
+		return decodedCommand{}, errors.New(
+
+			"kind is required",
+		)
+
+	}
+
+	if message.Data.Money.Amount == "" {
+
+		return decodedCommand{}, errors.New(
+
+			"money.amount is required",
+		)
+
+	}
+
+	if message.Data.Money.Currency == "" {
+
+		return decodedCommand{}, errors.New(
+
+			"money.currency is required",
+		)
+
+	}
+
+	currency := domain.Currency(message.Data.Money.Currency)
 
 	if currency != domain.BRL {
 
@@ -491,14 +581,14 @@ func decodeCommand(payload []byte) (decodedCommand, error) {
 
 			"unsupported currency: %s",
 
-			message.Data.Currency,
+			message.Data.Money.Currency,
 		)
 
 	}
 
 	money, err := domain.ParseMoney(
 
-		message.Data.Amount,
+		message.Data.Money.Amount,
 
 		currency,
 	)
