@@ -21,16 +21,12 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
-const testCommandsQueueURL = "http://sqs.us-east-1.localhost.localstack.cloud:4566/000000000000/wager-transactions.fifo"
-const testCommandsDLQURL = "http://sqs.us-east-1.localhost.localstack.cloud:4566/000000000000/wager-transactions-dlq.fifo"
-
 func TestConsumerProcessesBetFromSQSAndDeletesMessage(t *testing.T) {
 	ctx, cancel := context.WithTimeout(
 		context.Background(),
 		20*time.Second,
 	)
 	defer cancel()
-
 	pool, err := pgxpool.New(
 		ctx,
 		"postgres://wagering:wagering@localhost:5432/wagering?sslmode=disable",
@@ -39,14 +35,10 @@ func TestConsumerProcessesBetFromSQSAndDeletesMessage(t *testing.T) {
 		t.Fatalf("connect postgres: %v", err)
 	}
 	defer pool.Close()
-
 	cleanConsumerDatabase(t, ctx, pool)
-
 	client := newTestSQSClient()
-	purgeCommandsQueue(t, ctx, client)
-
+	commandsQueueURL := createIsolatedCommandsQueue(t, ctx, client)
 	walletService := wallet.NewService(pool)
-
 	createdWallet, err := walletService.Create(
 		ctx,
 		wallet.CreateWalletCommand{
@@ -57,16 +49,13 @@ func TestConsumerProcessesBetFromSQSAndDeletesMessage(t *testing.T) {
 	if err != nil {
 		t.Fatalf("create wallet: %v", err)
 	}
-
 	service := wagering.NewService(pool)
 	processor := wagering.NewMessageProcessor(pool, service)
-
 	consumer := NewConsumer(
 		client,
 		processor,
-		testCommandsQueueURL,
+		commandsQueueURL,
 	)
-
 	command := CommandMessage{
 		MessageID:  "sqs-message-" + uuid.NewString(),
 		Type:       "WAGER_TRANSACTION",
@@ -84,16 +73,14 @@ func TestConsumerProcessesBetFromSQSAndDeletesMessage(t *testing.T) {
 			Currency:              "BRL",
 		},
 	}
-
 	payload, err := json.Marshal(command)
 	if err != nil {
 		t.Fatalf("marshal command: %v", err)
 	}
-
 	_, err = client.SendMessage(
 		ctx,
 		&awssqs.SendMessageInput{
-			QueueUrl:               aws.String(testCommandsQueueURL),
+			QueueUrl:               aws.String(commandsQueueURL),
 			MessageBody:            aws.String(string(payload)),
 			MessageGroupId:         aws.String(createdWallet.WalletID),
 			MessageDeduplicationId: aws.String(command.MessageID),
@@ -102,22 +89,20 @@ func TestConsumerProcessesBetFromSQSAndDeletesMessage(t *testing.T) {
 	if err != nil {
 		t.Fatalf("send command to SQS: %v", err)
 	}
-
-	processed, err := consumer.ConsumeOnce(ctx)
-	if err != nil {
-		t.Fatalf("consume message: %v", err)
+	for {
+		processed, consumeErr := consumer.ConsumeOnce(ctx)
+		if consumeErr != nil {
+			t.Fatalf("consume message: %v", consumeErr)
+		}
+		if processed == 1 {
+			break
+		}
+		if ctx.Err() != nil {
+			t.Fatalf("timed out waiting for SQS delivery: %v", ctx.Err())
+		}
 	}
-
-	if processed != 1 {
-		t.Fatalf(
-			"expected 1 processed message, got %d",
-			processed,
-		)
-	}
-
 	var balance int64
 	var version int64
-
 	err = pool.QueryRow(
 		ctx,
 		`
@@ -130,23 +115,19 @@ func TestConsumerProcessesBetFromSQSAndDeletesMessage(t *testing.T) {
 	if err != nil {
 		t.Fatalf("query wallet: %v", err)
 	}
-
 	if balance != 7000 {
 		t.Fatalf(
 			"expected balance 7000, got %d",
 			balance,
 		)
 	}
-
 	if version != 2 {
 		t.Fatalf(
 			"expected wallet version 2, got %d",
 			version,
 		)
 	}
-
 	var completedAt *time.Time
-
 	err = pool.QueryRow(
 		ctx,
 		`
@@ -161,13 +142,10 @@ func TestConsumerProcessesBetFromSQSAndDeletesMessage(t *testing.T) {
 	if err != nil {
 		t.Fatalf("query inbox: %v", err)
 	}
-
 	if completedAt == nil {
 		t.Fatal("expected inbox message to be completed")
 	}
-
 	var betCount int
-
 	err = pool.QueryRow(
 		ctx,
 		`
@@ -182,16 +160,13 @@ func TestConsumerProcessesBetFromSQSAndDeletesMessage(t *testing.T) {
 	if err != nil {
 		t.Fatalf("count BET transactions: %v", err)
 	}
-
 	if betCount != 1 {
 		t.Fatalf(
 			"expected exactly 1 processed BET, got %d",
 			betCount,
 		)
 	}
-
 	var debitCount int
-
 	err = pool.QueryRow(
 		ctx,
 		`
@@ -205,20 +180,18 @@ func TestConsumerProcessesBetFromSQSAndDeletesMessage(t *testing.T) {
 	if err != nil {
 		t.Fatalf("count debit entries: %v", err)
 	}
-
 	if debitCount != 1 {
 		t.Fatalf(
 			"expected exactly 1 debit, got %d",
 			debitCount,
 		)
 	}
-
 	// ConsumeOnce deletes the SQS message only after the database
 	// transaction has committed successfully.
 	result, err := client.ReceiveMessage(
 		ctx,
 		&awssqs.ReceiveMessageInput{
-			QueueUrl:            aws.String(testCommandsQueueURL),
+			QueueUrl:            aws.String(commandsQueueURL),
 			MaxNumberOfMessages: 1,
 			WaitTimeSeconds:     1,
 		},
@@ -226,7 +199,6 @@ func TestConsumerProcessesBetFromSQSAndDeletesMessage(t *testing.T) {
 	if err != nil {
 		t.Fatalf("receive after processing: %v", err)
 	}
-
 	if len(result.Messages) != 0 {
 		t.Fatalf(
 			"expected command queue to be empty, got %d messages",
@@ -234,7 +206,6 @@ func TestConsumerProcessesBetFromSQSAndDeletesMessage(t *testing.T) {
 		)
 	}
 }
-
 func newTestSQSClient() *awssqs.Client {
 	return awssqs.New(
 		awssqs.Options{
@@ -252,14 +223,12 @@ func newTestSQSClient() *awssqs.Client {
 		},
 	)
 }
-
 func TestConsumerDoesNotProcessBetAgainWhenDeleteFailsAfterCommit(t *testing.T) {
 	ctx, cancel := context.WithTimeout(
 		context.Background(),
 		20*time.Second,
 	)
 	defer cancel()
-
 	pool, err := pgxpool.New(
 		ctx,
 		"postgres://wagering:wagering@localhost:5432/wagering?sslmode=disable",
@@ -268,14 +237,10 @@ func TestConsumerDoesNotProcessBetAgainWhenDeleteFailsAfterCommit(t *testing.T) 
 		t.Fatalf("connect postgres: %v", err)
 	}
 	defer pool.Close()
-
 	cleanConsumerDatabase(t, ctx, pool)
-
 	realClient := newTestSQSClient()
-	purgeCommandsQueue(t, ctx, realClient)
-
+	commandsQueueURL := createIsolatedCommandsQueue(t, ctx, realClient)
 	walletService := wallet.NewService(pool)
-
 	createdWallet, err := walletService.Create(
 		ctx,
 		wallet.CreateWalletCommand{
@@ -286,20 +251,16 @@ func TestConsumerDoesNotProcessBetAgainWhenDeleteFailsAfterCommit(t *testing.T) 
 	if err != nil {
 		t.Fatalf("create wallet: %v", err)
 	}
-
 	service := wagering.NewService(pool)
 	processor := wagering.NewMessageProcessor(pool, service)
-
 	client := &failFirstDeleteClient{
 		Client: realClient,
 	}
-
 	consumer := NewConsumer(
 		client,
 		processor,
-		testCommandsQueueURL,
+		commandsQueueURL,
 	)
-
 	command := CommandMessage{
 		MessageID:  "sqs-redelivery-message-" + uuid.NewString(),
 		Type:       "WAGER_TRANSACTION",
@@ -317,16 +278,14 @@ func TestConsumerDoesNotProcessBetAgainWhenDeleteFailsAfterCommit(t *testing.T) 
 			Currency:              "BRL",
 		},
 	}
-
 	payload, err := json.Marshal(command)
 	if err != nil {
 		t.Fatalf("marshal command: %v", err)
 	}
-
 	_, err = realClient.SendMessage(
 		ctx,
 		&awssqs.SendMessageInput{
-			QueueUrl:               aws.String(testCommandsQueueURL),
+			QueueUrl:               aws.String(commandsQueueURL),
 			MessageBody:            aws.String(string(payload)),
 			MessageGroupId:         aws.String(createdWallet.WalletID),
 			MessageDeduplicationId: aws.String(command.MessageID),
@@ -335,13 +294,26 @@ func TestConsumerDoesNotProcessBetAgainWhenDeleteFailsAfterCommit(t *testing.T) 
 	if err != nil {
 		t.Fatalf("send command: %v", err)
 	}
-
 	// Financial processing succeeds and commits, but deletion fails.
-	_, err = consumer.ConsumeOnce(ctx)
-	if err == nil {
-		t.Fatal("expected first consume to fail deleting SQS message")
+	//
+	// SQS/LocalStack delivery is asynchronous. A receive is allowed to return
+	// no messages even immediately after SendMessage, so keep polling until
+	// the message is actually delivered or the test context expires.
+	for {
+		_, err = consumer.ConsumeOnce(ctx)
+		if err != nil {
+			break
+		}
+		if client.lastReceivedMessage != nil {
+			t.Fatal("expected first delivered message to fail during deletion")
+		}
+		if ctx.Err() != nil {
+			t.Fatalf(
+				"timed out waiting for first SQS delivery: %v",
+				ctx.Err(),
+			)
+		}
 	}
-
 	assertConsumerWalletState(
 		t,
 		ctx,
@@ -351,18 +323,16 @@ func TestConsumerDoesNotProcessBetAgainWhenDeleteFailsAfterCommit(t *testing.T) 
 		1,
 		1,
 	)
-
 	// Make the same message immediately visible again instead of waiting
 	// for the queue's visibility timeout.
 	message := client.lastReceivedMessage
 	if message == nil || message.ReceiptHandle == nil {
 		t.Fatal("expected first delivery receipt handle")
 	}
-
 	_, err = realClient.ChangeMessageVisibility(
 		ctx,
 		&awssqs.ChangeMessageVisibilityInput{
-			QueueUrl:          aws.String(testCommandsQueueURL),
+			QueueUrl:          aws.String(commandsQueueURL),
 			ReceiptHandle:     message.ReceiptHandle,
 			VisibilityTimeout: 0,
 		},
@@ -370,20 +340,19 @@ func TestConsumerDoesNotProcessBetAgainWhenDeleteFailsAfterCommit(t *testing.T) 
 	if err != nil {
 		t.Fatalf("make message visible again: %v", err)
 	}
-
 	// Second delivery must hit the completed Inbox entry.
-	processed, err := consumer.ConsumeOnce(ctx)
-	if err != nil {
-		t.Fatalf("consume redelivery: %v", err)
+	for {
+		processed, consumeErr := consumer.ConsumeOnce(ctx)
+		if consumeErr != nil {
+			t.Fatalf("consume redelivery: %v", consumeErr)
+		}
+		if processed == 1 {
+			break
+		}
+		if ctx.Err() != nil {
+			t.Fatalf("timed out waiting for SQS redelivery: %v", ctx.Err())
+		}
 	}
-
-	if processed != 1 {
-		t.Fatalf(
-			"expected 1 redelivered message, got %d",
-			processed,
-		)
-	}
-
 	// Most important assertion:
 	// the same BET was NOT applied a second time.
 	assertConsumerWalletState(
@@ -395,11 +364,10 @@ func TestConsumerDoesNotProcessBetAgainWhenDeleteFailsAfterCommit(t *testing.T) 
 		1,
 		1,
 	)
-
 	result, err := realClient.ReceiveMessage(
 		ctx,
 		&awssqs.ReceiveMessageInput{
-			QueueUrl:            aws.String(testCommandsQueueURL),
+			QueueUrl:            aws.String(commandsQueueURL),
 			MaxNumberOfMessages: 1,
 			WaitTimeSeconds:     1,
 		},
@@ -407,7 +375,6 @@ func TestConsumerDoesNotProcessBetAgainWhenDeleteFailsAfterCommit(t *testing.T) 
 	if err != nil {
 		t.Fatalf("receive after successful redelivery: %v", err)
 	}
-
 	if len(result.Messages) != 0 {
 		t.Fatalf(
 			"expected queue to be empty after successful redelivery, got %d messages",
@@ -418,14 +385,11 @@ func TestConsumerDoesNotProcessBetAgainWhenDeleteFailsAfterCommit(t *testing.T) 
 
 type failFirstDeleteClient struct {
 	*awssqs.Client
-
 	deleteAttempts      int
 	lastReceivedMessage *awstypes.Message
 }
-
 type recordingReceiveClient struct {
 	*awssqs.Client
-
 	lastReceivedMessage *awstypes.Message
 }
 
@@ -442,15 +406,12 @@ func (c *recordingReceiveClient) ReceiveMessage(
 	if err != nil {
 		return nil, err
 	}
-
 	if len(output.Messages) > 0 {
 		message := output.Messages[0]
 		c.lastReceivedMessage = &message
 	}
-
 	return output, nil
 }
-
 func (c *failFirstDeleteClient) ReceiveMessage(
 	ctx context.Context,
 	input *awssqs.ReceiveMessageInput,
@@ -464,42 +425,35 @@ func (c *failFirstDeleteClient) ReceiveMessage(
 	if err != nil {
 		return nil, err
 	}
-
 	if len(output.Messages) > 0 {
 		message := output.Messages[0]
 		c.lastReceivedMessage = &message
 	}
-
 	return output, nil
 }
-
 func (c *failFirstDeleteClient) DeleteMessage(
 	ctx context.Context,
 	input *awssqs.DeleteMessageInput,
 	optFns ...func(*awssqs.Options),
 ) (*awssqs.DeleteMessageOutput, error) {
 	c.deleteAttempts++
-
 	if c.deleteAttempts == 1 {
 		return nil, errors.New(
 			"simulated delete failure after database commit",
 		)
 	}
-
 	return c.Client.DeleteMessage(
 		ctx,
 		input,
 		optFns...,
 	)
 }
-
 func TestConsumerRetriesInvalidMessageAndMovesItToDLQ(t *testing.T) {
 	ctx, cancel := context.WithTimeout(
 		context.Background(),
 		30*time.Second,
 	)
 	defer cancel()
-
 	pool, err := pgxpool.New(
 		ctx,
 		"postgres://wagering:wagering@localhost:5432/wagering?sslmode=disable",
@@ -508,16 +462,12 @@ func TestConsumerRetriesInvalidMessageAndMovesItToDLQ(t *testing.T) {
 		t.Fatalf("connect postgres: %v", err)
 	}
 	defer pool.Close()
-
 	cleanConsumerDatabase(t, ctx, pool)
-
 	realClient := newTestSQSClient()
-
-	purgeCommandsQueue(t, ctx, realClient)
-	purgeCommandsDLQ(t, ctx, realClient)
-
+	queues := createIsolatedCommandsQueueWithDLQ(t, ctx, realClient)
+	commandsQueueURL := queues.commandsURL
+	commandsDLQURL := queues.dlqURL
 	walletService := wallet.NewService(pool)
-
 	createdWallet, err := walletService.Create(
 		ctx,
 		wallet.CreateWalletCommand{
@@ -528,23 +478,18 @@ func TestConsumerRetriesInvalidMessageAndMovesItToDLQ(t *testing.T) {
 	if err != nil {
 		t.Fatalf("create wallet: %v", err)
 	}
-
 	service := wagering.NewService(pool)
 	processor := wagering.NewMessageProcessor(pool, service)
-
 	metrics := observability.NewMetrics()
-
 	client := &recordingReceiveClient{
 		Client: realClient,
 	}
-
 	consumer := NewConsumerWithMetrics(
 		client,
 		processor,
-		testCommandsQueueURL,
+		commandsQueueURL,
 		metrics,
 	)
-
 	command := CommandMessage{
 		MessageID:  "sqs-invalid-" + uuid.NewString(),
 		Type:       "WAGER_TRANSACTION",
@@ -559,21 +504,18 @@ func TestConsumerRetriesInvalidMessageAndMovesItToDLQ(t *testing.T) {
 			GameID:                "game-1",
 			Kind:                  "BET",
 			Amount:                "10.00",
-
 			// Currency intentionally omitted.
 			// decodeCommand must fail and the message must not be deleted.
 		},
 	}
-
 	payload, err := json.Marshal(command)
 	if err != nil {
 		t.Fatalf("marshal invalid command: %v", err)
 	}
-
 	_, err = realClient.SendMessage(
 		ctx,
 		&awssqs.SendMessageInput{
-			QueueUrl:               aws.String(testCommandsQueueURL),
+			QueueUrl:               aws.String(commandsQueueURL),
 			MessageBody:            aws.String(string(payload)),
 			MessageGroupId:         aws.String(createdWallet.WalletID),
 			MessageDeduplicationId: aws.String(command.MessageID),
@@ -582,7 +524,6 @@ func TestConsumerRetriesInvalidMessageAndMovesItToDLQ(t *testing.T) {
 	if err != nil {
 		t.Fatalf("send invalid command: %v", err)
 	}
-
 	// The source queue has maxReceiveCount=3.
 	//
 	// Each attempt must fail. Since a failed message is not deleted,
@@ -590,56 +531,36 @@ func TestConsumerRetriesInvalidMessageAndMovesItToDLQ(t *testing.T) {
 	// wait for the 30-second visibility timeout.
 	for attempt := 1; attempt <= 3; attempt++ {
 		client.lastReceivedMessage = nil
-
-		processed, err := consumer.ConsumeOnce(ctx)
-		if err == nil {
-			t.Fatalf(
-				"expected attempt %d to fail",
-				attempt,
-			)
+		for {
+			processed, consumeErr := consumer.ConsumeOnce(ctx)
+			if consumeErr != nil {
+				if processed != 0 {
+					t.Fatalf("expected 0 processed messages on attempt %d, got %d", attempt, processed)
+				}
+				if client.lastReceivedMessage == nil || client.lastReceivedMessage.ReceiptHandle == nil {
+					t.Fatalf("expected receipt handle on attempt %d", attempt)
+				}
+				break
+			}
+			if ctx.Err() != nil {
+				t.Fatalf("timed out waiting for poison-message attempt %d: %v", attempt, ctx.Err())
+			}
 		}
-
-		if processed != 0 {
-			t.Fatalf(
-				"expected 0 processed messages on attempt %d, got %d",
-				attempt,
-				processed,
-			)
-		}
-
-		if client.lastReceivedMessage == nil ||
-			client.lastReceivedMessage.ReceiptHandle == nil {
-			t.Fatalf(
-				"expected receipt handle on attempt %d",
-				attempt,
-			)
-		}
-
 		if attempt < 3 {
-			_, err = realClient.ChangeMessageVisibility(
-				ctx,
-				&awssqs.ChangeMessageVisibilityInput{
-					QueueUrl:          aws.String(testCommandsQueueURL),
-					ReceiptHandle:     client.lastReceivedMessage.ReceiptHandle,
-					VisibilityTimeout: 0,
-				},
-			)
+			_, err = realClient.ChangeMessageVisibility(ctx, &awssqs.ChangeMessageVisibilityInput{
+				QueueUrl: aws.String(commandsQueueURL), ReceiptHandle: client.lastReceivedMessage.ReceiptHandle, VisibilityTimeout: 0,
+			})
 			if err != nil {
-				t.Fatalf(
-					"make message visible after attempt %d: %v",
-					attempt,
-					err,
-				)
+				t.Fatalf("make message visible after attempt %d: %v", attempt, err)
 			}
 		}
 	}
-
 	// After the third failed delivery, make it visible once more.
 	// The next receive causes LocalStack/SQS to apply the redrive policy.
 	_, err = realClient.ChangeMessageVisibility(
 		ctx,
 		&awssqs.ChangeMessageVisibilityInput{
-			QueueUrl:          aws.String(testCommandsQueueURL),
+			QueueUrl:          aws.String(commandsQueueURL),
 			ReceiptHandle:     client.lastReceivedMessage.ReceiptHandle,
 			VisibilityTimeout: 0,
 		},
@@ -650,26 +571,22 @@ func TestConsumerRetriesInvalidMessageAndMovesItToDLQ(t *testing.T) {
 			err,
 		)
 	}
-
 	deadline := time.Now().Add(5 * time.Second)
-
 	var dlqMessage *awstypes.Message
-
 	for time.Now().Before(deadline) {
 		// Trigger source-queue receive so the redrive policy is evaluated.
 		_, _ = realClient.ReceiveMessage(
 			ctx,
 			&awssqs.ReceiveMessageInput{
-				QueueUrl:            aws.String(testCommandsQueueURL),
+				QueueUrl:            aws.String(commandsQueueURL),
 				MaxNumberOfMessages: 1,
 				WaitTimeSeconds:     0,
 			},
 		)
-
 		output, receiveErr := realClient.ReceiveMessage(
 			ctx,
 			&awssqs.ReceiveMessageInput{
-				QueueUrl:            aws.String(testCommandsDLQURL),
+				QueueUrl:            aws.String(commandsDLQURL),
 				MaxNumberOfMessages: 1,
 				WaitTimeSeconds:     1,
 				MessageSystemAttributeNames: []awstypes.MessageSystemAttributeName{
@@ -683,33 +600,27 @@ func TestConsumerRetriesInvalidMessageAndMovesItToDLQ(t *testing.T) {
 				receiveErr,
 			)
 		}
-
 		if len(output.Messages) == 1 {
 			message := output.Messages[0]
 			dlqMessage = &message
 			break
 		}
 	}
-
 	if dlqMessage == nil {
 		t.Fatal(
 			"expected invalid message to be moved to DLQ",
 		)
 	}
-
 	if dlqMessage.Body == nil {
 		t.Fatal("expected DLQ message body")
 	}
-
 	if *dlqMessage.Body != string(payload) {
 		t.Fatal(
 			"expected DLQ payload to match original message",
 		)
 	}
-
 	// No financial transaction must have been created from the poison message.
 	var betCount int
-
 	err = pool.QueryRow(
 		ctx,
 		`
@@ -720,24 +631,20 @@ func TestConsumerRetriesInvalidMessageAndMovesItToDLQ(t *testing.T) {
 		`,
 		createdWallet.WalletID,
 	).Scan(&betCount)
-
 	if err != nil {
 		t.Fatalf(
 			"count BET transactions: %v",
 			err,
 		)
 	}
-
 	if betCount != 0 {
 		t.Fatalf(
 			"expected poison message to create no BET transactions, got %d",
 			betCount,
 		)
 	}
-
 	var balance int64
 	var version int64
-
 	err = pool.QueryRow(
 		ctx,
 		`
@@ -753,31 +660,26 @@ func TestConsumerRetriesInvalidMessageAndMovesItToDLQ(t *testing.T) {
 			err,
 		)
 	}
-
 	if balance != 10000 {
 		t.Fatalf(
 			"expected balance to remain 10000, got %d",
 			balance,
 		)
 	}
-
 	if version != 1 {
 		t.Fatalf(
 			"expected wallet version to remain 1, got %d",
 			version,
 		)
 	}
-
 	// Verify that retry deliveries were actually observed by our metrics.
 	var metricsOutput bytes.Buffer
-
 	if err := metrics.WritePrometheus(&metricsOutput); err != nil {
 		t.Fatalf(
 			"write metrics: %v",
 			err,
 		)
 	}
-
 	if !strings.Contains(
 		metricsOutput.String(),
 		"wagering_sqs_retries_total 2",
@@ -788,7 +690,6 @@ func TestConsumerRetriesInvalidMessageAndMovesItToDLQ(t *testing.T) {
 		)
 	}
 }
-
 func assertConsumerWalletState(
 	t *testing.T,
 	ctx context.Context,
@@ -799,9 +700,7 @@ func assertConsumerWalletState(
 	expectedDebitCount int,
 ) {
 	t.Helper()
-
 	var balance int64
-
 	err := pool.QueryRow(
 		ctx,
 		"SELECT balance FROM wallets WHERE id = $1",
@@ -810,7 +709,6 @@ func assertConsumerWalletState(
 	if err != nil {
 		t.Fatalf("query wallet balance: %v", err)
 	}
-
 	if balance != expectedBalance {
 		t.Fatalf(
 			"expected balance %d, got %d",
@@ -818,9 +716,7 @@ func assertConsumerWalletState(
 			balance,
 		)
 	}
-
 	var betCount int
-
 	err = pool.QueryRow(
 		ctx,
 		`
@@ -834,7 +730,6 @@ func assertConsumerWalletState(
 	if err != nil {
 		t.Fatalf("count BET transactions: %v", err)
 	}
-
 	if betCount != expectedBetCount {
 		t.Fatalf(
 			"expected %d BET transactions, got %d",
@@ -842,9 +737,7 @@ func assertConsumerWalletState(
 			betCount,
 		)
 	}
-
 	var debitCount int
-
 	err = pool.QueryRow(
 		ctx,
 		`
@@ -858,7 +751,6 @@ func assertConsumerWalletState(
 	if err != nil {
 		t.Fatalf("count debit entries: %v", err)
 	}
-
 	if debitCount != expectedDebitCount {
 		t.Fatalf(
 			"expected %d debit entries, got %d",
@@ -868,52 +760,83 @@ func assertConsumerWalletState(
 	}
 }
 
-func purgeCommandsDLQ(
-	t *testing.T,
-	ctx context.Context,
-	client *awssqs.Client,
-) {
-	t.Helper()
-
-	_, err := client.PurgeQueue(
-		ctx,
-		&awssqs.PurgeQueueInput{
-			QueueUrl: aws.String(testCommandsDLQURL),
-		},
-	)
-	if err != nil {
-		t.Fatalf(
-			"purge commands DLQ: %v",
-			err,
-		)
-	}
+type isolatedTestQueues struct {
+	commandsURL string
+	dlqURL      string
 }
 
-func purgeCommandsQueue(
-	t *testing.T,
-	ctx context.Context,
-	client *awssqs.Client,
-) {
+func createIsolatedCommandsQueue(t *testing.T, ctx context.Context, client *awssqs.Client) string {
 	t.Helper()
-
-	_, err := client.PurgeQueue(
-		ctx,
-		&awssqs.PurgeQueueInput{
-			QueueUrl: aws.String(testCommandsQueueURL),
-		},
-	)
+	result, err := client.CreateQueue(ctx, &awssqs.CreateQueueInput{
+		QueueName:  aws.String("consumer-test-" + uuid.NewString() + ".fifo"),
+		Attributes: map[string]string{"FifoQueue": "true", "ContentBasedDeduplication": "false", "VisibilityTimeout": "30"},
+	})
 	if err != nil {
-		t.Fatalf("purge commands queue: %v", err)
+		t.Fatalf("create isolated commands queue: %v", err)
+	}
+	if result.QueueUrl == nil || *result.QueueUrl == "" {
+		t.Fatal("create isolated commands queue returned empty URL")
+	}
+	queueURL := *result.QueueUrl
+	t.Cleanup(func() { deleteTestQueue(t, client, queueURL) })
+	return queueURL
+}
+func createIsolatedCommandsQueueWithDLQ(t *testing.T, ctx context.Context, client *awssqs.Client) isolatedTestQueues {
+	t.Helper()
+	dlqResult, err := client.CreateQueue(ctx, &awssqs.CreateQueueInput{
+		QueueName:  aws.String("consumer-dlq-" + uuid.NewString() + ".fifo"),
+		Attributes: map[string]string{"FifoQueue": "true", "ContentBasedDeduplication": "false", "VisibilityTimeout": "30"},
+	})
+	if err != nil {
+		t.Fatalf("create isolated DLQ: %v", err)
+	}
+	if dlqResult.QueueUrl == nil || *dlqResult.QueueUrl == "" {
+		t.Fatal("create isolated DLQ returned empty URL")
+	}
+	dlqURL := *dlqResult.QueueUrl
+	attributes, err := client.GetQueueAttributes(ctx, &awssqs.GetQueueAttributesInput{
+		QueueUrl: aws.String(dlqURL), AttributeNames: []awstypes.QueueAttributeName{awstypes.QueueAttributeNameQueueArn},
+	})
+	if err != nil {
+		t.Fatalf("get isolated DLQ ARN: %v", err)
+	}
+	dlqARN := attributes.Attributes[string(awstypes.QueueAttributeNameQueueArn)]
+	if dlqARN == "" {
+		t.Fatal("isolated DLQ returned empty ARN")
+	}
+	redrivePolicy, err := json.Marshal(map[string]string{"deadLetterTargetArn": dlqARN, "maxReceiveCount": "3"})
+	if err != nil {
+		t.Fatalf("marshal redrive policy: %v", err)
+	}
+	commandsResult, err := client.CreateQueue(ctx, &awssqs.CreateQueueInput{
+		QueueName:  aws.String("consumer-source-" + uuid.NewString() + ".fifo"),
+		Attributes: map[string]string{"FifoQueue": "true", "ContentBasedDeduplication": "false", "VisibilityTimeout": "30", "RedrivePolicy": string(redrivePolicy)},
+	})
+	if err != nil {
+		t.Fatalf("create isolated commands queue with DLQ: %v", err)
+	}
+	if commandsResult.QueueUrl == nil || *commandsResult.QueueUrl == "" {
+		t.Fatal("create isolated commands queue returned empty URL")
+	}
+	commandsURL := *commandsResult.QueueUrl
+	t.Cleanup(func() { deleteTestQueue(t, client, commandsURL); deleteTestQueue(t, client, dlqURL) })
+	return isolatedTestQueues{commandsURL: commandsURL, dlqURL: dlqURL}
+}
+func deleteTestQueue(t *testing.T, client *awssqs.Client, queueURL string) {
+	t.Helper()
+	cleanupCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	_, err := client.DeleteQueue(cleanupCtx, &awssqs.DeleteQueueInput{QueueUrl: aws.String(queueURL)})
+	if err != nil {
+		t.Errorf("delete isolated SQS queue %s: %v", queueURL, err)
 	}
 }
-
 func cleanConsumerDatabase(
 	t *testing.T,
 	ctx context.Context,
 	pool *pgxpool.Pool,
 ) {
 	t.Helper()
-
 	_, err := pool.Exec(
 		ctx,
 		`

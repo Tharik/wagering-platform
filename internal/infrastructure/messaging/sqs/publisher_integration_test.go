@@ -13,31 +13,12 @@ import (
 	"github.com/google/uuid"
 )
 
-const testQueueURL = "http://sqs.us-east-1.localhost.localstack.cloud:4566/000000000000/wager-events.fifo"
-
 func TestPublisherPublishesEventToSQS(t *testing.T) {
-	ctx, cancel := context.WithTimeout(
-		context.Background(),
-		15*time.Second,
-	)
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
 
-	client := awssqs.New(awssqs.Options{
-		Region: "us-east-1",
-		Credentials: aws.NewCredentialsCache(
-			credentials.NewStaticCredentialsProvider(
-				"test",
-				"test",
-				"",
-			),
-		),
-		BaseEndpoint: aws.String(
-			"http://localhost:4566",
-		),
-	})
-
-	// Keep the integration test independent from previous executions.
-	purgeQueue(t, ctx, client)
+	client := newPublisherTestSQSClient()
+	queueURL := createPublisherTestQueue(t, ctx, client)
 
 	eventID := uuid.New()
 	aggregateID := uuid.New()
@@ -51,10 +32,7 @@ func TestPublisherPublishesEventToSQS(t *testing.T) {
 		t.Fatalf("marshal payload: %v", err)
 	}
 
-	publisher := NewPublisher(
-		client,
-		testQueueURL,
-	)
+	publisher := NewPublisher(client, queueURL)
 
 	err = publisher.Publish(
 		ctx,
@@ -70,23 +48,28 @@ func TestPublisherPublishesEventToSQS(t *testing.T) {
 		t.Fatalf("publish event: %v", err)
 	}
 
-	result, err := client.ReceiveMessage(
-		ctx,
-		&awssqs.ReceiveMessageInput{
-			QueueUrl:            aws.String(testQueueURL),
-			MaxNumberOfMessages: 1,
-			WaitTimeSeconds:     1,
-		},
-	)
-	if err != nil {
-		t.Fatalf("receive message: %v", err)
-	}
+	var result *awssqs.ReceiveMessageOutput
 
-	if len(result.Messages) != 1 {
-		t.Fatalf(
-			"expected 1 SQS message, got %d",
-			len(result.Messages),
+	for {
+		result, err = client.ReceiveMessage(
+			ctx,
+			&awssqs.ReceiveMessageInput{
+				QueueUrl:            aws.String(queueURL),
+				MaxNumberOfMessages: 1,
+				WaitTimeSeconds:     1,
+			},
 		)
+		if err != nil {
+			t.Fatalf("receive message: %v", err)
+		}
+
+		if len(result.Messages) == 1 {
+			break
+		}
+
+		if ctx.Err() != nil {
+			t.Fatalf("timed out waiting for published SQS event: %v", ctx.Err())
+		}
 	}
 
 	if result.Messages[0].Body == nil {
@@ -94,7 +77,6 @@ func TestPublisherPublishesEventToSQS(t *testing.T) {
 	}
 
 	var received map[string]any
-
 	if err := json.Unmarshal(
 		[]byte(*result.Messages[0].Body),
 		&received,
@@ -111,20 +93,63 @@ func TestPublisherPublishesEventToSQS(t *testing.T) {
 	}
 }
 
-func purgeQueue(
+func newPublisherTestSQSClient() *awssqs.Client {
+	return awssqs.New(
+		awssqs.Options{
+			Region: "us-east-1",
+			Credentials: aws.NewCredentialsCache(
+				credentials.NewStaticCredentialsProvider(
+					"test",
+					"test",
+					"",
+				),
+			),
+			BaseEndpoint: aws.String("http://localhost:4566"),
+		},
+	)
+}
+
+func createPublisherTestQueue(
 	t *testing.T,
 	ctx context.Context,
 	client *awssqs.Client,
-) {
+) string {
 	t.Helper()
 
-	_, err := client.PurgeQueue(
+	result, err := client.CreateQueue(
 		ctx,
-		&awssqs.PurgeQueueInput{
-			QueueUrl: aws.String(testQueueURL),
+		&awssqs.CreateQueueInput{
+			QueueName: aws.String("publisher-test-" + uuid.NewString() + ".fifo"),
+			Attributes: map[string]string{
+				"FifoQueue":                 "true",
+				"ContentBasedDeduplication": "false",
+			},
 		},
 	)
 	if err != nil {
-		t.Fatalf("purge SQS queue: %v", err)
+		t.Fatalf("create isolated publisher queue: %v", err)
 	}
+
+	if result.QueueUrl == nil || *result.QueueUrl == "" {
+		t.Fatal("create isolated publisher queue returned empty URL")
+	}
+
+	queueURL := *result.QueueUrl
+
+	t.Cleanup(func() {
+		cleanupCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+
+		_, err := client.DeleteQueue(
+			cleanupCtx,
+			&awssqs.DeleteQueueInput{
+				QueueUrl: aws.String(queueURL),
+			},
+		)
+		if err != nil {
+			t.Errorf("delete isolated publisher queue %s: %v", queueURL, err)
+		}
+	})
+
+	return queueURL
 }

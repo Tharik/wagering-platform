@@ -25,7 +25,6 @@ func (f *fakeMessagePublisher) Publish(
 	defer f.mu.Unlock()
 
 	f.events = append(f.events, event)
-
 	return f.publishErr
 }
 
@@ -41,11 +40,7 @@ func TestPublishBatchPublishesPendingEventAndMarksItPublished(t *testing.T) {
 	eventID := insertTestEvent(t, ctx, pool)
 
 	messagePublisher := &fakeMessagePublisher{}
-
-	publisher := NewPublisher(
-		pool,
-		messagePublisher,
-	)
+	publisher := NewPublisher(pool, messagePublisher)
 
 	count, err := publisher.PublishBatch(ctx)
 	if err != nil {
@@ -72,7 +67,6 @@ func TestPublishBatchPublishesPendingEventAndMarksItPublished(t *testing.T) {
 	}
 
 	var publishedAt *time.Time
-
 	err = pool.QueryRow(
 		ctx,
 		`
@@ -105,11 +99,7 @@ func TestPublishBatchSchedulesRetryWhenPublishingFails(t *testing.T) {
 	messagePublisher := &fakeMessagePublisher{
 		publishErr: errors.New("broker unavailable"),
 	}
-
-	publisher := NewPublisher(
-		pool,
-		messagePublisher,
-	)
+	publisher := NewPublisher(pool, messagePublisher)
 
 	count, err := publisher.PublishBatch(ctx)
 	if err != nil {
@@ -168,83 +158,6 @@ func TestPublishBatchSchedulesRetryWhenPublishingFails(t *testing.T) {
 	}
 }
 
-func newTestPool(
-	t *testing.T,
-	ctx context.Context,
-) *pgxpool.Pool {
-	t.Helper()
-
-	pool, err := pgxpool.New(
-		ctx,
-		"postgres://wagering:wagering@localhost:5432/wagering?sslmode=disable",
-	)
-	if err != nil {
-		t.Fatalf("connect postgres: %v", err)
-	}
-
-	return pool
-}
-
-func cleanOutbox(
-	t *testing.T,
-	ctx context.Context,
-	pool *pgxpool.Pool,
-) {
-	t.Helper()
-
-	_, err := pool.Exec(
-		ctx,
-		`DELETE FROM outbox_events`,
-	)
-	if err != nil {
-		t.Fatalf("clean outbox: %v", err)
-	}
-}
-
-func insertTestEvent(
-	t *testing.T,
-	ctx context.Context,
-	pool *pgxpool.Pool,
-) uuid.UUID {
-	t.Helper()
-
-	eventID := uuid.New()
-	aggregateID := uuid.New()
-	now := time.Now().UTC()
-
-	_, err := pool.Exec(
-		ctx,
-		`
-		INSERT INTO outbox_events (
-			id,
-			aggregate_id,
-			event_type,
-			payload,
-			occurred_at,
-			attempts,
-			next_attempt_at
-		)
-		VALUES (
-			$1,
-			$2,
-			'TestEvent',
-			'{"message":"hello"}'::jsonb,
-			$3,
-			0,
-			$3
-		)
-		`,
-		eventID,
-		aggregateID,
-		now,
-	)
-	if err != nil {
-		t.Fatalf("insert test outbox event: %v", err)
-	}
-
-	return eventID
-}
-
 func TestConcurrentPublishersDoNotPublishSameEventSimultaneously(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
@@ -276,9 +189,18 @@ func TestConcurrentPublishersDoNotPublishSameEventSimultaneously(t *testing.T) {
 		results <- result{count: count, err: err}
 	}()
 
-	firstPublishedID := <-messagePublisher.started
+	var firstPublishedID uuid.UUID
+	select {
+	case firstPublishedID = <-messagePublisher.started:
+	case <-ctx.Done():
+		t.Fatalf(
+			"timed out waiting for first publisher to claim event: %v",
+			ctx.Err(),
+		)
+	}
 
 	if firstPublishedID != eventID {
+		close(messagePublisher.release)
 		t.Fatalf(
 			"expected first publisher to receive %s, got %s",
 			eventID,
@@ -294,47 +216,48 @@ func TestConcurrentPublishersDoNotPublishSameEventSimultaneously(t *testing.T) {
 	select {
 	case secondPublishedID := <-messagePublisher.started:
 		close(messagePublisher.release)
-
 		t.Fatalf(
 			"same event was concurrently published twice: %s",
 			secondPublishedID,
 		)
-
 	case <-time.After(500 * time.Millisecond):
-		// Expected: the second publisher must not claim the same event.
+		// Expected: FOR UPDATE SKIP LOCKED prevents the second publisher
+		// from claiming the row while the first publisher owns its lock.
+	case <-ctx.Done():
+		close(messagePublisher.release)
+		t.Fatalf(
+			"context ended while checking concurrent publisher: %v",
+			ctx.Err(),
+		)
 	}
 
 	close(messagePublisher.release)
 
+	totalPublished := 0
 	for i := 0; i < 2; i++ {
-		result := <-results
+		select {
+		case result := <-results:
+			if result.err != nil {
+				t.Fatalf(
+					"publisher returned error: %v",
+					result.err,
+				)
+			}
+			totalPublished += result.count
 
-		if result.err != nil {
+		case <-ctx.Done():
 			t.Fatalf(
-				"publisher returned error: %v",
-				result.err,
+				"timed out waiting for publisher result: %v",
+				ctx.Err(),
 			)
 		}
 	}
-}
 
-type blockingMessagePublisher struct {
-	started chan uuid.UUID
-	release chan struct{}
-}
-
-func (p *blockingMessagePublisher) Publish(
-	ctx context.Context,
-	event Event,
-) error {
-	p.started <- event.ID
-
-	select {
-	case <-p.release:
-		return nil
-
-	case <-ctx.Done():
-		return ctx.Err()
+	if totalPublished != 1 {
+		t.Fatalf(
+			"expected exactly 1 published event across both publishers, got %d",
+			totalPublished,
+		)
 	}
 }
 
@@ -352,11 +275,7 @@ func TestPendingEventIsRepublishedWithSameEventIDAfterFailedAttempt(t *testing.T
 	failingPublisher := &fakeMessagePublisher{
 		publishErr: errors.New("simulated publisher failure"),
 	}
-
-	firstPublisher := NewPublisher(
-		pool,
-		failingPublisher,
-	)
+	firstPublisher := NewPublisher(pool, failingPublisher)
 
 	count, err := firstPublisher.PublishBatch(ctx)
 	if err != nil {
@@ -385,12 +304,12 @@ func TestPendingEventIsRepublishedWithSameEventIDAfterFailedAttempt(t *testing.T
 		)
 	}
 
-	// Make the failed event immediately eligible for another attempt.
+	// Make the failed event unambiguously eligible for another attempt.
 	_, err = pool.Exec(
 		ctx,
 		`
 		UPDATE outbox_events
-		SET next_attempt_at = NOW()
+		SET next_attempt_at = NOW() - INTERVAL '1 second'
 		WHERE id = $1
 		`,
 		eventID,
@@ -403,11 +322,7 @@ func TestPendingEventIsRepublishedWithSameEventIDAfterFailedAttempt(t *testing.T
 	}
 
 	recoveryPublisher := &fakeMessagePublisher{}
-
-	secondPublisher := NewPublisher(
-		pool,
-		recoveryPublisher,
-	)
+	secondPublisher := NewPublisher(pool, recoveryPublisher)
 
 	count, err = secondPublisher.PublishBatch(ctx)
 	if err != nil {
@@ -429,7 +344,6 @@ func TestPendingEventIsRepublishedWithSameEventIDAfterFailedAttempt(t *testing.T
 	}
 
 	recoveredEvent := recoveryPublisher.events[0]
-
 	if recoveredEvent.ID != eventID {
 		t.Fatalf(
 			"expected stable event ID %s after recovery, got %s",
@@ -472,8 +386,110 @@ func TestPendingEventIsRepublishedWithSameEventIDAfterFailedAttempt(t *testing.T
 	}
 
 	if publishedAt == nil {
-		t.Fatal(
-			"expected recovered event to be marked published",
+		t.Fatal("expected recovered event to be marked published")
+	}
+}
+
+func newTestPool(
+	t *testing.T,
+	ctx context.Context,
+) *pgxpool.Pool {
+	t.Helper()
+
+	pool, err := pgxpool.New(
+		ctx,
+		"postgres://wagering:wagering@localhost:5432/wagering?sslmode=disable",
+	)
+	if err != nil {
+		t.Fatalf("connect postgres: %v", err)
+	}
+
+	return pool
+}
+
+func cleanOutbox(
+	t *testing.T,
+	ctx context.Context,
+	pool *pgxpool.Pool,
+) {
+	t.Helper()
+
+	_, err := pool.Exec(
+		ctx,
+		`DELETE FROM outbox_events`,
+	)
+	if err != nil {
+		t.Fatalf("clean outbox: %v", err)
+	}
+}
+
+func insertTestEvent(
+	t *testing.T,
+	ctx context.Context,
+	pool *pgxpool.Pool,
+) uuid.UUID {
+	t.Helper()
+
+	eventID := uuid.New()
+	aggregateID := uuid.New()
+
+	// The production query selects rows with next_attempt_at <= NOW().
+	// Put fixtures clearly in the past instead of relying on the Go and
+	// PostgreSQL clocks being identical at a timestamp boundary.
+	eligibleAt := time.Now().UTC().Add(-time.Second)
+
+	_, err := pool.Exec(
+		ctx,
+		`
+		INSERT INTO outbox_events (
+			id,
+			aggregate_id,
+			event_type,
+			payload,
+			occurred_at,
+			attempts,
+			next_attempt_at
 		)
+		VALUES (
+			$1,
+			$2,
+			'TestEvent',
+			'{"message":"hello"}'::jsonb,
+			$3,
+			0,
+			$3
+		)
+		`,
+		eventID,
+		aggregateID,
+		eligibleAt,
+	)
+	if err != nil {
+		t.Fatalf("insert test outbox event: %v", err)
+	}
+
+	return eventID
+}
+
+type blockingMessagePublisher struct {
+	started chan uuid.UUID
+	release chan struct{}
+}
+
+func (p *blockingMessagePublisher) Publish(
+	ctx context.Context,
+	event Event,
+) error {
+	select {
+	case p.started <- event.ID:
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+
+	select {
+	case <-p.release:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
 	}
 }

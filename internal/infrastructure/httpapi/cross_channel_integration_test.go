@@ -31,8 +31,6 @@ const (
 
 	crossChannelOIDCIssuer = "http://localhost:8081/realms/wagering"
 	crossChannelTokenURL   = crossChannelOIDCIssuer + "/protocol/openid-connect/token"
-
-	crossChannelQueueURL = "http://sqs.us-east-1.localhost.localstack.cloud:4566/000000000000/wager-transactions.fifo"
 )
 
 func TestSameWagerAcrossHTTPAndSQSIsProcessedExactlyOnce(t *testing.T) {
@@ -53,15 +51,11 @@ func TestSameWagerAcrossHTTPAndSQSIsProcessedExactlyOnce(t *testing.T) {
 
 	sqsClient := newCrossChannelSQSClient()
 
-	_, err = sqsClient.PurgeQueue(
+	crossChannelQueueURL := createCrossChannelQueue(
+		t,
 		ctx,
-		&awssqs.PurgeQueueInput{
-			QueueUrl: aws.String(crossChannelQueueURL),
-		},
+		sqsClient,
 	)
-	if err != nil {
-		t.Fatalf("purge SQS queue: %v", err)
-	}
 
 	auth, err := httpapi.NewAuthMiddleware(ctx, crossChannelOIDCIssuer)
 	if err != nil {
@@ -240,16 +234,25 @@ func TestSameWagerAcrossHTTPAndSQSIsProcessedExactlyOnce(t *testing.T) {
 		crossChannelQueueURL,
 	)
 
-	processed, err := consumer.ConsumeOnce(ctx)
-	if err != nil {
-		t.Fatalf("consume cross-channel replay: %v", err)
-	}
+	var processed int
 
-	if processed != 1 {
-		t.Fatalf(
-			"expected consumer to handle 1 SQS delivery, got %d",
-			processed,
-		)
+	for {
+		processed, err = consumer.ConsumeOnce(ctx)
+
+		if err != nil {
+			t.Fatalf("consume cross-channel replay: %v", err)
+		}
+
+		if processed == 1 {
+			break
+		}
+
+		if ctx.Err() != nil {
+			t.Fatalf(
+				"timed out waiting for cross-channel SQS delivery: %v",
+				ctx.Err(),
+			)
+		}
 	}
 
 	// The important part:
@@ -399,6 +402,61 @@ func TestSameWagerAcrossHTTPAndSQSIsProcessedExactlyOnce(t *testing.T) {
 			len(remaining.Messages),
 		)
 	}
+}
+
+func createCrossChannelQueue(
+	t *testing.T,
+	ctx context.Context,
+	client *awssqs.Client,
+) string {
+	t.Helper()
+
+	queueName := "cross-channel-" + uuid.NewString() + ".fifo"
+
+	result, err := client.CreateQueue(
+		ctx,
+		&awssqs.CreateQueueInput{
+			QueueName: aws.String(queueName),
+			Attributes: map[string]string{
+				"FifoQueue":                 "true",
+				"ContentBasedDeduplication": "false",
+				"VisibilityTimeout":         "30",
+			},
+		},
+	)
+	if err != nil {
+		t.Fatalf("create isolated SQS queue: %v", err)
+	}
+
+	if result.QueueUrl == nil || *result.QueueUrl == "" {
+		t.Fatal("create isolated SQS queue returned empty URL")
+	}
+
+	queueURL := *result.QueueUrl
+
+	t.Cleanup(func() {
+		cleanupCtx, cancel := context.WithTimeout(
+			context.Background(),
+			5*time.Second,
+		)
+		defer cancel()
+
+		_, err := client.DeleteQueue(
+			cleanupCtx,
+			&awssqs.DeleteQueueInput{
+				QueueUrl: aws.String(queueURL),
+			},
+		)
+		if err != nil {
+			t.Errorf(
+				"delete isolated SQS queue %s: %v",
+				queueURL,
+				err,
+			)
+		}
+	})
+
+	return queueURL
 }
 
 func newCrossChannelSQSClient() *awssqs.Client {

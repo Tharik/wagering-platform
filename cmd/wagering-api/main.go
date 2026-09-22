@@ -65,7 +65,7 @@ func main() {
 			newPendingReferenceWorker,
 
 			httpapi.NewWalletHandler,
-			httpapi.NewWagerHandler,
+			newWagerHandler,
 			newHealthHandler,
 			newHTTPServer,
 			httpapi.NewMetricsHandler,
@@ -242,12 +242,14 @@ func newSQSConsumer(
 	processor *wagering.MessageProcessor,
 	cfg config,
 	metrics *observability.Metrics,
+	logger *slog.Logger,
 ) *messagingsqs.Consumer {
-	return messagingsqs.NewConsumerWithMetrics(
+	return messagingsqs.NewConsumerWithMetricsAndLogger(
 		client,
 		processor,
 		cfg.CommandsQueueURL,
 		metrics,
+		logger,
 	)
 }
 
@@ -406,4 +408,14 @@ func envOrDefault(
 	}
 
 	return value
+}
+
+func newWagerHandler(
+	service *wagering.Service,
+	logger *slog.Logger,
+) *httpapi.WagerHandler {
+	return httpapi.NewWagerHandlerWithLogger(
+		service,
+		logger,
+	)
 }

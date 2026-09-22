@@ -10,6 +10,7 @@ import (
 	"github.com/Tharik/wagering-platform/internal/observability"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -74,6 +75,8 @@ func (s *Service) Process(
 
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
+		s.recordConcurrencyConflict(err)
+
 		return ProcessResult{}, fmt.Errorf(
 			"begin transaction: %w",
 			err,
@@ -86,10 +89,13 @@ func (s *Service) Process(
 
 	result, err := s.ProcessTx(ctx, tx, cmd)
 	if err != nil {
+		s.recordConcurrencyConflict(err)
 		return ProcessResult{}, err
 	}
 
 	if err := tx.Commit(ctx); err != nil {
+		s.recordConcurrencyConflict(err)
+
 		return ProcessResult{}, fmt.Errorf(
 			"commit wager transaction: %w",
 			err,
@@ -516,6 +522,20 @@ func (s *Service) ProcessTx(
 		State:         domain.WagerStateProcessed,
 		Balance:       wallet.Balance,
 	}, nil
+}
+
+func (s *Service) recordConcurrencyConflict(err error) {
+	var pgErr *pgconn.PgError
+
+	if !errors.As(err, &pgErr) {
+		return
+	}
+
+	switch pgErr.Code {
+	case "40001", // serialization_failure
+		"40P01": // deadlock_detected
+		s.metrics.IncConcurrencyConflicts()
+	}
 }
 
 func (s *Service) recordProcessResult(

@@ -3,6 +3,7 @@ package httpapi
 import (
 	"encoding/json"
 	"errors"
+	"log/slog"
 	"net/http"
 	"time"
 
@@ -13,6 +14,7 @@ import (
 
 type WagerHandler struct {
 	service *wagering.Service
+	logger  *slog.Logger
 }
 
 func NewWagerHandler(
@@ -20,6 +22,19 @@ func NewWagerHandler(
 ) *WagerHandler {
 	return &WagerHandler{
 		service: service,
+		logger:  slog.Default(),
+	}
+}
+
+func NewWagerHandlerWithLogger(
+	service *wagering.Service,
+	logger *slog.Logger,
+) *WagerHandler {
+	return &WagerHandler{
+		service: service,
+		logger: logger.With(
+			slog.String("component", "http_wager"),
+		),
 	}
 }
 
@@ -146,9 +161,11 @@ func (h *WagerHandler) Process(
 		return
 	}
 
+	correlationID := uuid.NewString()
+
 	command := wagering.ProcessCommand{
 		IdempotencyKey: request.IdempotencyKey,
-		CorrelationID:  uuid.NewString(),
+		CorrelationID:  correlationID,
 		Request: domain.WagerRequest{
 			ProviderID:                     principal.ClientID,
 			ExternalTransactionID:          request.ExternalTransactionID,
@@ -167,9 +184,31 @@ func (h *WagerHandler) Process(
 		command,
 	)
 	if err != nil {
+		h.logger.Error(
+			"HTTP wager processing failed",
+			slog.String("correlationId", correlationID),
+			slog.String("providerId", principal.ClientID),
+			slog.String("walletId", request.WalletID),
+			slog.String("externalTransactionId", request.ExternalTransactionID),
+			slog.String("kind", request.Kind),
+			slog.Any("error", err),
+		)
+
 		writeWagerError(w, err)
 		return
 	}
+
+	h.logger.Info(
+		"HTTP wager processed",
+		slog.String("correlationId", correlationID),
+		slog.String("providerId", principal.ClientID),
+		slog.String("walletId", request.WalletID),
+		slog.String("externalTransactionId", request.ExternalTransactionID),
+		slog.String("transactionId", result.TransactionID),
+		slog.String("kind", request.Kind),
+		slog.String("status", string(result.State)),
+		slog.Bool("idempotentReplay", result.IdempotentReplay),
+	)
 
 	status := http.StatusOK
 

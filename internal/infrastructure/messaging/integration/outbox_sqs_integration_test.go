@@ -15,13 +15,8 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
-const queueURL = "http://sqs.us-east-1.localhost.localstack.cloud:4566/000000000000/wager-events.fifo"
-
 func TestOutboxPublishesPersistedEventToSQS(t *testing.T) {
-	ctx, cancel := context.WithTimeout(
-		context.Background(),
-		15*time.Second,
-	)
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
 
 	pool, err := pgxpool.New(
@@ -33,26 +28,14 @@ func TestOutboxPublishesPersistedEventToSQS(t *testing.T) {
 	}
 	defer pool.Close()
 
-	sqsClient := awssqs.New(awssqs.Options{
-		Region: "us-east-1",
-		Credentials: aws.NewCredentialsCache(
-			credentials.NewStaticCredentialsProvider(
-				"test",
-				"test",
-				"",
-			),
-		),
-		BaseEndpoint: aws.String(
-			"http://localhost:4566",
-		),
-	})
+	sqsClient := newOutboxSQSTestClient()
+	queueURL := createOutboxSQSTestQueue(t, ctx, sqsClient)
 
 	cleanOutbox(t, ctx, pool)
-	purgeQueue(t, ctx, sqsClient)
 
 	eventID := uuid.New()
 	aggregateID := uuid.New()
-	now := time.Now().UTC()
+	now := time.Now().UTC().Add(-time.Second)
 
 	payload, err := json.Marshal(map[string]any{
 		"eventId":     eventID.String(),
@@ -123,7 +106,6 @@ func TestOutboxPublishesPersistedEventToSQS(t *testing.T) {
 	}
 
 	var publishedAt *time.Time
-
 	err = pool.QueryRow(
 		ctx,
 		`
@@ -141,23 +123,28 @@ func TestOutboxPublishesPersistedEventToSQS(t *testing.T) {
 		t.Fatal("expected outbox event to be marked published")
 	}
 
-	result, err := sqsClient.ReceiveMessage(
-		ctx,
-		&awssqs.ReceiveMessageInput{
-			QueueUrl:            aws.String(queueURL),
-			MaxNumberOfMessages: 1,
-			WaitTimeSeconds:     1,
-		},
-	)
-	if err != nil {
-		t.Fatalf("receive SQS message: %v", err)
-	}
+	var result *awssqs.ReceiveMessageOutput
 
-	if len(result.Messages) != 1 {
-		t.Fatalf(
-			"expected 1 message from SQS, got %d",
-			len(result.Messages),
+	for {
+		result, err = sqsClient.ReceiveMessage(
+			ctx,
+			&awssqs.ReceiveMessageInput{
+				QueueUrl:            aws.String(queueURL),
+				MaxNumberOfMessages: 1,
+				WaitTimeSeconds:     1,
+			},
 		)
+		if err != nil {
+			t.Fatalf("receive SQS message: %v", err)
+		}
+
+		if len(result.Messages) == 1 {
+			break
+		}
+
+		if ctx.Err() != nil {
+			t.Fatalf("timed out waiting for outbox SQS event: %v", ctx.Err())
+		}
 	}
 
 	if result.Messages[0].Body == nil {
@@ -201,6 +188,67 @@ func TestOutboxPublishesPersistedEventToSQS(t *testing.T) {
 	}
 }
 
+func newOutboxSQSTestClient() *awssqs.Client {
+	return awssqs.New(
+		awssqs.Options{
+			Region: "us-east-1",
+			Credentials: aws.NewCredentialsCache(
+				credentials.NewStaticCredentialsProvider(
+					"test",
+					"test",
+					"",
+				),
+			),
+			BaseEndpoint: aws.String("http://localhost:4566"),
+		},
+	)
+}
+
+func createOutboxSQSTestQueue(
+	t *testing.T,
+	ctx context.Context,
+	client *awssqs.Client,
+) string {
+	t.Helper()
+
+	result, err := client.CreateQueue(
+		ctx,
+		&awssqs.CreateQueueInput{
+			QueueName: aws.String("outbox-test-" + uuid.NewString() + ".fifo"),
+			Attributes: map[string]string{
+				"FifoQueue":                 "true",
+				"ContentBasedDeduplication": "false",
+			},
+		},
+	)
+	if err != nil {
+		t.Fatalf("create isolated outbox queue: %v", err)
+	}
+
+	if result.QueueUrl == nil || *result.QueueUrl == "" {
+		t.Fatal("create isolated outbox queue returned empty URL")
+	}
+
+	queueURL := *result.QueueUrl
+
+	t.Cleanup(func() {
+		cleanupCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+
+		_, err := client.DeleteQueue(
+			cleanupCtx,
+			&awssqs.DeleteQueueInput{
+				QueueUrl: aws.String(queueURL),
+			},
+		)
+		if err != nil {
+			t.Errorf("delete isolated outbox queue %s: %v", queueURL, err)
+		}
+	})
+
+	return queueURL
+}
+
 func cleanOutbox(
 	t *testing.T,
 	ctx context.Context,
@@ -213,23 +261,5 @@ func cleanOutbox(
 		`DELETE FROM outbox_events`,
 	); err != nil {
 		t.Fatalf("clean outbox: %v", err)
-	}
-}
-
-func purgeQueue(
-	t *testing.T,
-	ctx context.Context,
-	client *awssqs.Client,
-) {
-	t.Helper()
-
-	_, err := client.PurgeQueue(
-		ctx,
-		&awssqs.PurgeQueueInput{
-			QueueUrl: aws.String(queueURL),
-		},
-	)
-	if err != nil {
-		t.Fatalf("purge SQS queue: %v", err)
 	}
 }
