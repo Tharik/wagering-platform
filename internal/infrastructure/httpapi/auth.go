@@ -9,6 +9,16 @@ import (
 	"github.com/coreos/go-oidc/v3/oidc"
 )
 
+const (
+	wageringAPIAudience = "wagering-api"
+	internalClientID    = "wagering-internal"
+)
+
+var allowedProviderClients = map[string]struct{}{
+	"provider-a": {},
+	"provider-b": {},
+}
+
 type principalContextKey struct{}
 
 type Principal struct {
@@ -30,7 +40,7 @@ func NewAuthMiddleware(
 
 	verifier := provider.Verifier(
 		&oidc.Config{
-			SkipClientIDCheck: true,
+			ClientID: wageringAPIAudience,
 		},
 	)
 
@@ -92,12 +102,12 @@ func (m *AuthMiddleware) Authenticate(
 				clientID = claims.ClientID
 			}
 
-			if clientID == "" {
+			if !isAllowedClient(clientID) {
 				writeJSON(
 					w,
-					http.StatusUnauthorized,
+					http.StatusForbidden,
 					map[string]string{
-						"error": "unauthorized",
+						"error": "forbidden",
 					},
 				)
 				return
@@ -117,6 +127,15 @@ func (m *AuthMiddleware) Authenticate(
 			)
 		},
 	)
+}
+
+func isAllowedClient(clientID string) bool {
+	if clientID == internalClientID {
+		return true
+	}
+
+	_, ok := allowedProviderClients[clientID]
+	return ok
 }
 
 func PrincipalFromContext(
@@ -168,7 +187,7 @@ func (m *AuthMiddleware) ProviderOnly(
 				return
 			}
 
-			if principal.ClientID == "wagering-internal" {
+			if _, ok := allowedProviderClients[principal.ClientID]; !ok {
 				writeJSON(
 					w,
 					http.StatusForbidden,
@@ -201,7 +220,7 @@ func (m *AuthMiddleware) InternalOnly(
 				return
 			}
 
-			if principal.ClientID != "wagering-internal" {
+			if principal.ClientID != internalClientID {
 				writeJSON(
 					w,
 					http.StatusForbidden,
