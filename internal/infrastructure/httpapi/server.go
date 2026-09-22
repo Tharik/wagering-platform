@@ -52,7 +52,7 @@ func NewServer(
 	)
 
 	mux.Handle(
-		"GET /wallets/{id}/reconciliation",
+		"POST /wallets/{id}/reconciliation",
 		auth.Authenticate(
 			auth.InternalOnly(
 				http.HandlerFunc(walletHandler.Reconcile),
@@ -60,9 +60,9 @@ func NewServer(
 		),
 	)
 
-	// Provider operations.
+	// Provider wagering operations.
 	mux.Handle(
-		"POST /wagers",
+		"POST /wagering/transactions",
 		auth.Authenticate(
 			auth.ProviderOnly(
 				http.HandlerFunc(wagerHandler.Process),
@@ -71,10 +71,19 @@ func NewServer(
 	)
 
 	mux.Handle(
-		"GET /wagers/{id}",
+		"GET /wagering/transactions/{id}",
 		auth.Authenticate(
 			auth.ProviderOnly(
 				http.HandlerFunc(wagerHandler.Get),
+			),
+		),
+	)
+
+	mux.Handle(
+		"GET /providers/{providerId}/wagering/transactions/{externalTransactionId}",
+		auth.Authenticate(
+			auth.ProviderOnly(
+				http.HandlerFunc(wagerHandler.GetByExternalTransactionID),
 			),
 		),
 	)

@@ -204,7 +204,7 @@ func TestOIDCAuthenticationAndProviderIsolation(t *testing.T) {
 			t,
 			ctx,
 			http.MethodPost,
-			testServer.URL+"/wagers",
+			testServer.URL+"/wagering/transactions",
 			internalToken,
 			body,
 		)
@@ -219,12 +219,14 @@ func TestOIDCAuthenticationAndProviderIsolation(t *testing.T) {
 		}
 	})
 
+	const providerAExternalTransactionID = "provider-a-auth-external"
+
 	var wagerID string
 
 	t.Run("provider A creates wager and identity comes from token", func(t *testing.T) {
 		body := wagerBody(
 			"provider-a-auth-test",
-			"provider-a-auth-external",
+			providerAExternalTransactionID,
 			walletID,
 		)
 
@@ -232,7 +234,7 @@ func TestOIDCAuthenticationAndProviderIsolation(t *testing.T) {
 			t,
 			ctx,
 			http.MethodPost,
-			testServer.URL+"/wagers",
+			testServer.URL+"/wagering/transactions",
 			providerAToken,
 			body,
 		)
@@ -281,12 +283,32 @@ func TestOIDCAuthenticationAndProviderIsolation(t *testing.T) {
 		}
 	})
 
+	t.Run("internal client cannot read provider wager", func(t *testing.T) {
+		response := doRequest(
+			t,
+			ctx,
+			http.MethodGet,
+			testServer.URL+"/wagering/transactions/"+wagerID,
+			internalToken,
+			nil,
+		)
+		defer response.Body.Close()
+
+		if response.StatusCode != http.StatusForbidden {
+			t.Fatalf(
+				"expected 403, got %d: %s",
+				response.StatusCode,
+				readBody(t, response),
+			)
+		}
+	})
+
 	t.Run("provider A can read its own wager", func(t *testing.T) {
 		response := doRequest(
 			t,
 			ctx,
 			http.MethodGet,
-			testServer.URL+"/wagers/"+wagerID,
+			testServer.URL+"/wagering/transactions/"+wagerID,
 			providerAToken,
 			nil,
 		)
@@ -319,7 +341,104 @@ func TestOIDCAuthenticationAndProviderIsolation(t *testing.T) {
 			t,
 			ctx,
 			http.MethodGet,
-			testServer.URL+"/wagers/"+wagerID,
+			testServer.URL+"/wagering/transactions/"+wagerID,
+			providerBToken,
+			nil,
+		)
+		defer response.Body.Close()
+
+		if response.StatusCode != http.StatusNotFound {
+			t.Fatalf(
+				"expected 404, got %d: %s",
+				response.StatusCode,
+				readBody(t, response),
+			)
+		}
+	})
+
+	t.Run("provider A can read its wager by external transaction ID", func(t *testing.T) {
+		response := doRequest(
+			t,
+			ctx,
+			http.MethodGet,
+			testServer.URL+
+				"/providers/provider-a/wagering/transactions/"+
+				providerAExternalTransactionID,
+			providerAToken,
+			nil,
+		)
+		defer response.Body.Close()
+
+		if response.StatusCode != http.StatusOK {
+			t.Fatalf(
+				"expected 200, got %d: %s",
+				response.StatusCode,
+				readBody(t, response),
+			)
+		}
+
+		var result struct {
+			TransactionID         string `json:"transactionId"`
+			ProviderID            string `json:"providerId"`
+			ExternalTransactionID string `json:"externalTransactionId"`
+		}
+
+		decodeJSON(t, response, &result)
+
+		if result.TransactionID != wagerID {
+			t.Fatalf(
+				"expected transactionId %s, got %s",
+				wagerID,
+				result.TransactionID,
+			)
+		}
+
+		if result.ProviderID != "provider-a" {
+			t.Fatalf(
+				"expected providerId provider-a, got %s",
+				result.ProviderID,
+			)
+		}
+
+		if result.ExternalTransactionID != providerAExternalTransactionID {
+			t.Fatalf(
+				"expected externalTransactionId %s, got %s",
+				providerAExternalTransactionID,
+				result.ExternalTransactionID,
+			)
+		}
+	})
+
+	t.Run("provider A cannot use provider B namespace", func(t *testing.T) {
+		response := doRequest(
+			t,
+			ctx,
+			http.MethodGet,
+			testServer.URL+
+				"/providers/provider-b/wagering/transactions/"+
+				providerAExternalTransactionID,
+			providerAToken,
+			nil,
+		)
+		defer response.Body.Close()
+
+		if response.StatusCode != http.StatusForbidden {
+			t.Fatalf(
+				"expected 403, got %d: %s",
+				response.StatusCode,
+				readBody(t, response),
+			)
+		}
+	})
+
+	t.Run("provider B cannot find provider A external transaction in its namespace", func(t *testing.T) {
+		response := doRequest(
+			t,
+			ctx,
+			http.MethodGet,
+			testServer.URL+
+				"/providers/provider-b/wagering/transactions/"+
+				providerAExternalTransactionID,
 			providerBToken,
 			nil,
 		)
@@ -347,7 +466,7 @@ func TestOIDCAuthenticationAndProviderIsolation(t *testing.T) {
 			t,
 			ctx,
 			http.MethodPost,
-			testServer.URL+"/wagers",
+			testServer.URL+"/wagering/transactions",
 			providerAToken,
 			body,
 		)

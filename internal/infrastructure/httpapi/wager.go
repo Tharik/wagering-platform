@@ -211,27 +211,61 @@ func (h *WagerHandler) Get(
 		principal.ClientID,
 	)
 	if err != nil {
-		if errors.Is(err, wagering.ErrWagerNotFound) {
-			writeJSON(
-				w,
-				http.StatusNotFound,
-				map[string]string{
-					"error": "wager transaction not found",
-				},
-			)
-			return
-		}
+		writeWagerQueryError(w, err)
+		return
+	}
 
+	writeWagerResult(w, result)
+}
+
+func (h *WagerHandler) GetByExternalTransactionID(
+	w http.ResponseWriter,
+	r *http.Request,
+) {
+	principal, ok := PrincipalFromContext(r.Context())
+	if !ok {
 		writeJSON(
 			w,
-			http.StatusInternalServerError,
+			http.StatusUnauthorized,
 			map[string]string{
-				"error": "failed to query wager transaction",
+				"error": "unauthorized",
 			},
 		)
 		return
 	}
 
+	providerID := r.PathValue("providerId")
+
+	// The provider in the URL must be the provider authenticated by OIDC.
+	// This prevents one provider from querying another provider's transactions.
+	if providerID != principal.ClientID {
+		writeJSON(
+			w,
+			http.StatusForbidden,
+			map[string]string{
+				"error": "provider does not match authenticated identity",
+			},
+		)
+		return
+	}
+
+	result, err := h.service.GetByExternalTransactionIDForProvider(
+		r.Context(),
+		r.PathValue("externalTransactionId"),
+		principal.ClientID,
+	)
+	if err != nil {
+		writeWagerQueryError(w, err)
+		return
+	}
+
+	writeWagerResult(w, result)
+}
+
+func writeWagerResult(
+	w http.ResponseWriter,
+	result wagering.WagerResult,
+) {
 	amount := domain.NewMoney(
 		result.Amount,
 		domain.Currency(result.Currency),
@@ -270,6 +304,30 @@ func (h *WagerHandler) Get(
 			ResultBalance:                  resultBalance,
 			CreatedAt:                      result.CreatedAt.UTC().Format(time.RFC3339Nano),
 			UpdatedAt:                      result.UpdatedAt.UTC().Format(time.RFC3339Nano),
+		},
+	)
+}
+
+func writeWagerQueryError(
+	w http.ResponseWriter,
+	err error,
+) {
+	if errors.Is(err, wagering.ErrWagerNotFound) {
+		writeJSON(
+			w,
+			http.StatusNotFound,
+			map[string]string{
+				"error": "wager transaction not found",
+			},
+		)
+		return
+	}
+
+	writeJSON(
+		w,
+		http.StatusInternalServerError,
+		map[string]string{
+			"error": "failed to query wager transaction",
 		},
 	)
 }

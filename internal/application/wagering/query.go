@@ -37,6 +37,84 @@ func (s *Service) GetForProvider(
 	transactionID string,
 	providerID string,
 ) (WagerResult, error) {
+	return scanWagerResult(
+		s.pool.QueryRow(
+			ctx,
+			`
+			SELECT
+				id::text,
+				provider_id,
+				external_transaction_id,
+				idempotency_key,
+				wallet_id::text,
+				player_id,
+				round_id,
+				game_id,
+				kind::text,
+				state::text,
+				amount,
+				currency,
+				reference_external_transaction_id,
+				referenced_transaction_id::text,
+				failure_code,
+				result_balance,
+				created_at,
+				updated_at
+			FROM wager_transactions
+			WHERE id = $1
+			  AND provider_id = $2
+			`,
+			transactionID,
+			providerID,
+		),
+	)
+}
+
+func (s *Service) GetByExternalTransactionIDForProvider(
+	ctx context.Context,
+	externalTransactionID string,
+	providerID string,
+) (WagerResult, error) {
+	return scanWagerResult(
+		s.pool.QueryRow(
+			ctx,
+			`
+			SELECT
+				id::text,
+				provider_id,
+				external_transaction_id,
+				idempotency_key,
+				wallet_id::text,
+				player_id,
+				round_id,
+				game_id,
+				kind::text,
+				state::text,
+				amount,
+				currency,
+				reference_external_transaction_id,
+				referenced_transaction_id::text,
+				failure_code,
+				result_balance,
+				created_at,
+				updated_at
+			FROM wager_transactions
+			WHERE provider_id = $1
+			  AND external_transaction_id = $2
+			`,
+			providerID,
+			externalTransactionID,
+		),
+	)
+}
+
+type rowScanner interface {
+	Scan(dest ...any) error
+}
+
+func scanWagerResult(
+	row rowScanner,
+) (WagerResult, error) {
 	var result WagerResult
 
 	var (
@@ -50,35 +128,7 @@ func (s *Service) GetForProvider(
 		failureCode                    *string
 	)
 
-	err := s.pool.QueryRow(
-		ctx,
-		`
-		SELECT
-			id::text,
-			provider_id,
-			external_transaction_id,
-			idempotency_key,
-			wallet_id::text,
-			player_id,
-			round_id,
-			game_id,
-			kind::text,
-			state::text,
-			amount,
-			currency,
-			reference_external_transaction_id,
-			referenced_transaction_id::text,
-			failure_code,
-			result_balance,
-			created_at,
-			updated_at
-		FROM wager_transactions
-		WHERE id = $1
-		  AND provider_id = $2
-		`,
-		transactionID,
-		providerID,
-	).Scan(
+	err := row.Scan(
 		&result.TransactionID,
 		&storedProviderID,
 		&externalTransactionID,
