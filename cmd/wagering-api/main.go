@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"os"
+	"sync"
 
 	"github.com/Tharik/wagering-platform/internal/application/wagering"
 	"github.com/Tharik/wagering-platform/internal/application/wallet"
@@ -217,6 +218,7 @@ func registerLifecycle(
 	httpServer *httpapi.Server,
 ) {
 	var cancel context.CancelFunc
+	var workers sync.WaitGroup
 
 	lifecycle.Append(
 		fx.Hook{
@@ -228,8 +230,17 @@ func registerLifecycle(
 
 				httpServer.Start()
 
-				go consumerWorker.Run(workerContext)
-				go outboxWorker.Run(workerContext)
+				workers.Add(2)
+
+				go func() {
+					defer workers.Done()
+					consumerWorker.Run(workerContext)
+				}()
+
+				go func() {
+					defer workers.Done()
+					outboxWorker.Run(workerContext)
+				}()
 
 				return nil
 			},
@@ -237,6 +248,19 @@ func registerLifecycle(
 			OnStop: func(ctx context.Context) error {
 				if cancel != nil {
 					cancel()
+				}
+
+				workersStopped := make(chan struct{})
+
+				go func() {
+					workers.Wait()
+					close(workersStopped)
+				}()
+
+				select {
+				case <-workersStopped:
+				case <-ctx.Done():
+					return ctx.Err()
 				}
 
 				if err := httpServer.Shutdown(ctx); err != nil {
