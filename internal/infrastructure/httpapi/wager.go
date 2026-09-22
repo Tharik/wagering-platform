@@ -5,6 +5,7 @@ import (
 	"errors"
 	"log/slog"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/Tharik/wagering-platform/internal/application/wagering"
@@ -39,25 +40,28 @@ func NewWagerHandlerWithLogger(
 }
 
 type processWagerRequest struct {
-	IdempotencyKey                 string `json:"idempotencyKey"`
-	ExternalTransactionID          string `json:"externalTransactionId"`
-	PlayerID                       string `json:"playerId"`
-	WalletID                       string `json:"walletId"`
-	RoundID                        string `json:"roundId"`
-	GameID                         string `json:"gameId"`
-	Kind                           string `json:"kind"`
-	Amount                         string `json:"amount"`
-	Currency                       string `json:"currency"`
-	ReferenceExternalTransactionID string `json:"referenceExternalTransactionId,omitempty"`
+	ProviderID                     string   `json:"providerId"`
+	ExternalTransactionID          string   `json:"externalTransactionId"`
+	PlayerID                       string   `json:"playerId"`
+	WalletID                       string   `json:"walletId"`
+	RoundID                        string   `json:"roundId"`
+	GameID                         string   `json:"gameId"`
+	Kind                           string   `json:"kind"`
+	Money                          moneyDTO `json:"money"`
+	ReferenceExternalTransactionID string   `json:"referenceExternalTransactionId,omitempty"`
+}
+
+type moneyDTO struct {
+	Amount   string `json:"amount"`
+	Currency string `json:"currency"`
 }
 
 type processWagerResponse struct {
-	TransactionID    string `json:"transactionId"`
-	State            string `json:"state"`
-	Balance          string `json:"balance"`
-	Currency         string `json:"currency"`
-	IdempotentReplay bool   `json:"idempotentReplay"`
-	FailureCode      string `json:"failureCode,omitempty"`
+	TransactionID    string   `json:"transactionId"`
+	Status           string   `json:"status"`
+	Balance          moneyDTO `json:"balance"`
+	IdempotentReplay bool     `json:"idempotentReplay"`
+	FailureCode      string   `json:"failureCode,omitempty"`
 }
 
 type wagerResponse struct {
@@ -113,15 +117,28 @@ func (h *WagerHandler) Process(
 		return
 	}
 
-	if request.IdempotencyKey == "" ||
+	idempotencyKey := r.Header.Get("Idempotency-Key")
+
+	if strings.TrimSpace(idempotencyKey) == "" {
+		writeJSON(
+			w,
+			http.StatusBadRequest,
+			map[string]string{
+				"error": "Idempotency-Key header is required",
+			},
+		)
+		return
+	}
+
+	if request.ProviderID == "" ||
 		request.ExternalTransactionID == "" ||
 		request.PlayerID == "" ||
 		request.WalletID == "" ||
 		request.RoundID == "" ||
 		request.GameID == "" ||
 		request.Kind == "" ||
-		request.Amount == "" ||
-		request.Currency == "" {
+		request.Money.Amount == "" ||
+		request.Money.Currency == "" {
 
 		writeJSON(
 			w,
@@ -133,7 +150,18 @@ func (h *WagerHandler) Process(
 		return
 	}
 
-	currency := domain.Currency(request.Currency)
+	if request.ProviderID != principal.ClientID {
+		writeJSON(
+			w,
+			http.StatusForbidden,
+			map[string]string{
+				"error": "provider does not match authenticated identity",
+			},
+		)
+		return
+	}
+
+	currency := domain.Currency(request.Money.Currency)
 
 	if currency != domain.BRL {
 		writeJSON(
@@ -147,7 +175,7 @@ func (h *WagerHandler) Process(
 	}
 
 	amount, err := domain.ParseMoney(
-		request.Amount,
+		request.Money.Amount,
 		currency,
 	)
 	if err != nil {
@@ -164,7 +192,7 @@ func (h *WagerHandler) Process(
 	correlationID := uuid.NewString()
 
 	command := wagering.ProcessCommand{
-		IdempotencyKey: request.IdempotencyKey,
+		IdempotencyKey: idempotencyKey,
 		CorrelationID:  correlationID,
 		Request: domain.WagerRequest{
 			ProviderID:                     principal.ClientID,
@@ -220,10 +248,12 @@ func (h *WagerHandler) Process(
 		w,
 		status,
 		processWagerResponse{
-			TransactionID:    result.TransactionID,
-			State:            string(result.State),
-			Balance:          result.Balance.String(),
-			Currency:         string(result.Balance.Currency()),
+			TransactionID: result.TransactionID,
+			Status:        string(result.State),
+			Balance: moneyDTO{
+				Amount:   result.Balance.String(),
+				Currency: string(result.Balance.Currency()),
+			},
 			IdempotentReplay: result.IdempotentReplay,
 			FailureCode:      result.FailureCode,
 		},

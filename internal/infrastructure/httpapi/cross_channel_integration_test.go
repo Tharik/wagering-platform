@@ -146,22 +146,24 @@ func TestSameWagerAcrossHTTPAndSQSIsProcessedExactlyOnce(t *testing.T) {
 	externalTransactionID := "cross-channel-external-" + uuid.NewString()
 
 	// First delivery: HTTP.
-	httpResponse := crossChannelRequest(
+	httpResponse := crossChannelWagerRequest(
 		t,
 		ctx,
-		http.MethodPost,
 		testServer.URL+"/wagering/transactions",
 		providerToken,
+		idempotencyKey,
 		map[string]any{
-			"idempotencyKey":        idempotencyKey,
+			"providerId":            "provider-a",
 			"externalTransactionId": externalTransactionID,
 			"playerId":              "player-cross-channel",
 			"walletId":              walletResult.WalletID,
 			"roundId":               "round-cross-channel",
 			"gameId":                "game-cross-channel",
 			"kind":                  "BET",
-			"amount":                "30.00",
-			"currency":              "BRL",
+			"money": map[string]any{
+				"amount":   "30.00",
+				"currency": "BRL",
+			},
 		},
 	)
 	defer httpResponse.Body.Close()
@@ -545,6 +547,49 @@ func crossChannelRequest(
 ) *http.Response {
 	t.Helper()
 
+	return crossChannelRequestWithIdempotencyKey(
+		t,
+		ctx,
+		method,
+		target,
+		token,
+		"",
+		body,
+	)
+}
+
+func crossChannelWagerRequest(
+	t *testing.T,
+	ctx context.Context,
+	target string,
+	token string,
+	idempotencyKey string,
+	body any,
+) *http.Response {
+	t.Helper()
+
+	return crossChannelRequestWithIdempotencyKey(
+		t,
+		ctx,
+		http.MethodPost,
+		target,
+		token,
+		idempotencyKey,
+		body,
+	)
+}
+
+func crossChannelRequestWithIdempotencyKey(
+	t *testing.T,
+	ctx context.Context,
+	method string,
+	target string,
+	token string,
+	idempotencyKey string,
+	body any,
+) *http.Response {
+	t.Helper()
+
 	var requestBody io.Reader
 
 	if body != nil {
@@ -572,6 +617,9 @@ func crossChannelRequest(
 
 	if token != "" {
 		request.Header.Set("Authorization", "Bearer "+token)
+	}
+	if idempotencyKey != "" {
+		request.Header.Set("Idempotency-Key", idempotencyKey)
 	}
 
 	response, err := http.DefaultClient.Do(request)

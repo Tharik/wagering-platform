@@ -270,23 +270,25 @@ func createPaginationBetHTTP(
 	t.Helper()
 
 	body := map[string]any{
-		"idempotencyKey":        idempotencyKey,
+		"providerId":            "provider-a",
 		"externalTransactionId": externalTransactionID,
 		"playerId":              "player-ledger-http-pagination",
 		"walletId":              walletID,
 		"roundId":               "round-ledger-http-pagination",
 		"gameId":                "game-ledger-http-pagination",
 		"kind":                  "BET",
-		"amount":                "10.00",
-		"currency":              "BRL",
+		"money": map[string]any{
+			"amount":   "10.00",
+			"currency": "BRL",
+		},
 	}
 
-	response := doRequest(
+	response := doWagerRequest(
 		t,
 		ctx,
-		http.MethodPost,
 		baseURL+"/wagering/transactions",
 		token,
+		idempotencyKey,
 		body,
 	)
 	defer response.Body.Close()

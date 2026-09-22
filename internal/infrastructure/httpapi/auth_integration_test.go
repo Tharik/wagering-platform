@@ -217,7 +217,6 @@ func TestOIDCAuthenticationAndProviderIsolation(t *testing.T) {
 	t.Run("internal client cannot access provider wager endpoint", func(t *testing.T) {
 		body := wagerBody(
 			"internal-must-fail",
-			"internal-must-fail",
 			walletID,
 		)
 
@@ -246,17 +245,16 @@ func TestOIDCAuthenticationAndProviderIsolation(t *testing.T) {
 
 	t.Run("provider A creates wager and identity comes from token", func(t *testing.T) {
 		body := wagerBody(
-			"provider-a-auth-test",
 			providerAExternalTransactionID,
 			walletID,
 		)
 
-		response := doRequest(
+		response := doWagerRequest(
 			t,
 			ctx,
-			http.MethodPost,
 			testServer.URL+"/wagering/transactions",
 			providerAToken,
+			"provider-a-auth-test",
 			body,
 		)
 		defer response.Body.Close()
@@ -271,12 +269,31 @@ func TestOIDCAuthenticationAndProviderIsolation(t *testing.T) {
 
 		var result struct {
 			TransactionID string `json:"transactionId"`
+			Status        string `json:"status"`
+			State         string `json:"state"`
+			Balance       struct {
+				Amount   string `json:"amount"`
+				Currency string `json:"currency"`
+			} `json:"balance"`
+			IdempotentReplay bool `json:"idempotentReplay"`
 		}
 
 		decodeJSON(t, response, &result)
 
 		if result.TransactionID == "" {
 			t.Fatal("expected transactionId")
+		}
+		if result.Status != "PROCESSED" {
+			t.Fatalf("expected status PROCESSED, got %s", result.Status)
+		}
+		if result.State != "" {
+			t.Fatalf("expected response not to contain state, got %s", result.State)
+		}
+		if result.Balance.Amount != "90.00" || result.Balance.Currency != "BRL" {
+			t.Fatalf("unexpected nested balance: %+v", result.Balance)
+		}
+		if result.IdempotentReplay {
+			t.Fatal("expected first request not to be an idempotent replay")
 		}
 
 		wagerID = result.TransactionID
@@ -301,6 +318,72 @@ func TestOIDCAuthenticationAndProviderIsolation(t *testing.T) {
 				"expected persisted provider provider-a, got %s",
 				providerID,
 			)
+		}
+	})
+
+	t.Run("missing Idempotency-Key is rejected", func(t *testing.T) {
+		response := doRequest(
+			t,
+			ctx,
+			http.MethodPost,
+			testServer.URL+"/wagering/transactions",
+			providerAToken,
+			wagerBody("missing-header-external", walletID),
+		)
+		defer response.Body.Close()
+
+		if response.StatusCode != http.StatusBadRequest {
+			t.Fatalf("expected 400, got %d: %s", response.StatusCode, readBody(t, response))
+		}
+	})
+
+	t.Run("blank Idempotency-Key is rejected", func(t *testing.T) {
+		response := doWagerRequest(
+			t,
+			ctx,
+			testServer.URL+"/wagering/transactions",
+			providerAToken,
+			"   ",
+			wagerBody("blank-header-external", walletID),
+		)
+		defer response.Body.Close()
+
+		if response.StatusCode != http.StatusBadRequest {
+			t.Fatalf("expected 400, got %d: %s", response.StatusCode, readBody(t, response))
+		}
+	})
+
+	t.Run("idempotent replay uses header and preserves original result", func(t *testing.T) {
+		response := doWagerRequest(
+			t,
+			ctx,
+			testServer.URL+"/wagering/transactions",
+			providerAToken,
+			"provider-a-auth-test",
+			wagerBody(providerAExternalTransactionID, walletID),
+		)
+		defer response.Body.Close()
+
+		if response.StatusCode != http.StatusOK {
+			t.Fatalf("expected 200, got %d: %s", response.StatusCode, readBody(t, response))
+		}
+
+		var result struct {
+			TransactionID    string `json:"transactionId"`
+			Status           string `json:"status"`
+			IdempotentReplay bool   `json:"idempotentReplay"`
+			Balance          struct {
+				Amount   string `json:"amount"`
+				Currency string `json:"currency"`
+			} `json:"balance"`
+		}
+		decodeJSON(t, response, &result)
+
+		if result.TransactionID != wagerID || result.Status != "PROCESSED" || !result.IdempotentReplay {
+			t.Fatalf("unexpected replay response: %+v", result)
+		}
+		if result.Balance.Amount != "90.00" || result.Balance.Currency != "BRL" {
+			t.Fatalf("unexpected replay balance: %+v", result.Balance)
 		}
 	})
 
@@ -476,26 +559,25 @@ func TestOIDCAuthenticationAndProviderIsolation(t *testing.T) {
 
 	t.Run("provider cannot spoof providerId in request body", func(t *testing.T) {
 		body := wagerBody(
-			"provider-spoof-test",
 			"provider-spoof-external",
 			walletID,
 		)
 
 		body["providerId"] = "provider-b"
 
-		response := doRequest(
+		response := doWagerRequest(
 			t,
 			ctx,
-			http.MethodPost,
 			testServer.URL+"/wagering/transactions",
 			providerAToken,
+			"provider-spoof-test",
 			body,
 		)
 		defer response.Body.Close()
 
-		if response.StatusCode != http.StatusBadRequest {
+		if response.StatusCode != http.StatusForbidden {
 			t.Fatalf(
-				"expected 400, got %d: %s",
+				"expected 403, got %d: %s",
 				response.StatusCode,
 				readBody(t, response),
 			)
@@ -546,21 +628,43 @@ func TestOIDCAuthenticationAndProviderIsolation(t *testing.T) {
 }
 
 func wagerBody(
-	idempotencyKey string,
 	externalTransactionID string,
 	walletID string,
 ) map[string]any {
 	return map[string]any{
-		"idempotencyKey":        idempotencyKey,
+		"providerId":            "provider-a",
 		"externalTransactionId": externalTransactionID,
 		"playerId":              "player-auth-integration",
 		"walletId":              walletID,
 		"roundId":               "round-auth-integration",
 		"gameId":                "game-auth-integration",
 		"kind":                  "BET",
-		"amount":                "10.00",
-		"currency":              "BRL",
+		"money": map[string]any{
+			"amount":   "10.00",
+			"currency": "BRL",
+		},
 	}
+}
+
+func doWagerRequest(
+	t *testing.T,
+	ctx context.Context,
+	target string,
+	token string,
+	idempotencyKey string,
+	body any,
+) *http.Response {
+	t.Helper()
+
+	return doRequestWithIdempotencyKey(
+		t,
+		ctx,
+		http.MethodPost,
+		target,
+		token,
+		&idempotencyKey,
+		body,
+	)
 }
 
 func getClientCredentialsToken(
@@ -637,6 +741,28 @@ func doRequest(
 ) *http.Response {
 	t.Helper()
 
+	return doRequestWithIdempotencyKey(
+		t,
+		ctx,
+		method,
+		target,
+		token,
+		nil,
+		body,
+	)
+}
+
+func doRequestWithIdempotencyKey(
+	t *testing.T,
+	ctx context.Context,
+	method string,
+	target string,
+	token string,
+	idempotencyKey *string,
+	body any,
+) *http.Response {
+	t.Helper()
+
 	var requestBody io.Reader
 
 	if body != nil {
@@ -664,6 +790,9 @@ func doRequest(
 
 	if token != "" {
 		request.Header.Set("Authorization", "Bearer "+token)
+	}
+	if idempotencyKey != nil {
+		request.Header.Set("Idempotency-Key", *idempotencyKey)
 	}
 
 	response, err := http.DefaultClient.Do(request)
