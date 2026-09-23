@@ -495,6 +495,33 @@ func TestSamePlayerDifferentCurrencyIsNotDuplicate(t *testing.T) {
 	}
 }
 
+func TestCreateWalletUsesDomainValidationBeforePersistence(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	pool, err := pgxpool.New(ctx, "postgres://wagering:wagering@localhost:5432/wagering?sslmode=disable")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer pool.Close()
+	cleanDatabase(t, ctx, pool)
+
+	_, err = NewService(pool).Create(ctx, CreateWalletCommand{
+		PlayerID:       "",
+		InitialBalance: domain.Zero(domain.BRL),
+	})
+	if !errors.Is(err, domain.ErrInvalidWalletPlayerID) {
+		t.Fatalf("expected invalid wallet player ID, got %v", err)
+	}
+
+	var count int
+	if err := pool.QueryRow(ctx, `SELECT COUNT(*) FROM wallets`).Scan(&count); err != nil {
+		t.Fatal(err)
+	}
+	if count != 0 {
+		t.Fatalf("expected no persisted wallet, got %d", count)
+	}
+}
+
 func cleanDatabase(
 	t *testing.T,
 	ctx context.Context,

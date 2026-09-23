@@ -188,12 +188,16 @@ func lockWallet(
 		return domain.Wallet{}, fmt.Errorf("lock wallet: %w", err)
 	}
 
-	return domain.Wallet{
-		ID:        id,
-		PlayerID:  playerID,
-		Balance:   domain.NewMoney(balance, domain.Currency(currency)),
-		Version:   version,
-		CreatedAt: createdAt,
-		UpdatedAt: updatedAt,
-	}, nil
+	wallet, err := domain.ReconstituteWallet(
+		id,
+		playerID,
+		domain.NewMoney(balance, domain.Currency(currency)),
+		version,
+		createdAt,
+		updatedAt,
+	)
+	if err != nil {
+		return domain.Wallet{}, fmt.Errorf("reconstitute wallet: %w", err)
+	}
+	return wallet, nil
 }

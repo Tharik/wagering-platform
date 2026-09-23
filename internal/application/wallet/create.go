@@ -78,6 +78,18 @@ func (s *Service) Create(
 	ctx context.Context,
 	cmd CreateWalletCommand,
 ) (CreateWalletResult, error) {
+	now := time.Now().UTC()
+	walletID := uuid.New()
+	domainWallet, err := domain.NewWallet(
+		walletID.String(),
+		cmd.PlayerID,
+		cmd.InitialBalance,
+		now,
+	)
+	if err != nil {
+		return CreateWalletResult{}, err
+	}
+
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
 		return CreateWalletResult{}, fmt.Errorf("begin transaction: %w", err)
@@ -87,10 +99,8 @@ func (s *Service) Create(
 		_ = tx.Rollback(ctx)
 	}()
 
-	now := time.Now().UTC()
-	walletID := uuid.New()
 	correlationID := uuid.NewString()
-	currency := string(cmd.InitialBalance.Currency())
+	currency := string(domainWallet.Balance.Currency())
 
 	_, err = tx.Exec(
 		ctx,
@@ -107,9 +117,9 @@ func (s *Service) Create(
 		VALUES ($1, $2, $3, $4, 1, $5, $5)
 		`,
 		walletID,
-		cmd.PlayerID,
+		domainWallet.PlayerID,
 		currency,
-		cmd.InitialBalance.Amount(),
+		domainWallet.Balance.Amount(),
 		now,
 	)
 	if err != nil {
@@ -125,13 +135,13 @@ func (s *Service) Create(
 
 	// A wallet with zero initial balance does not create an
 	// OPENING transaction, ledger entry, or events.
-	if !cmd.InitialBalance.IsZero() {
+	if !domainWallet.Balance.IsZero() {
 		if err := createOpeningTransaction(
 			ctx,
 			tx,
 			walletID,
-			cmd.PlayerID,
-			cmd.InitialBalance,
+			domainWallet.PlayerID,
+			domainWallet.Balance,
 			correlationID,
 			now,
 		); err != nil {
@@ -145,8 +155,8 @@ func (s *Service) Create(
 
 	return CreateWalletResult{
 		WalletID: walletID.String(),
-		Balance:  cmd.InitialBalance,
-		Version:  1,
+		Balance:  domainWallet.Balance,
+		Version:  domainWallet.Version,
 	}, nil
 }
 
