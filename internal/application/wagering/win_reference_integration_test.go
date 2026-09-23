@@ -140,13 +140,10 @@ func TestReferencedWinFollowsPendingReferenceToTerminalRejection(t *testing.T) {
 		INSERT INTO wager_transactions (
 			id, provider_id, external_transaction_id, idempotency_key, payload_hash,
 			wallet_id, player_id, round_id, game_id, kind, state, amount, currency,
-			reference_external_transaction_id, result_balance,
-			reference_next_attempt_at, reference_expires_at, created_at, updated_at
+			result_balance, created_at, updated_at
 		) VALUES ($1, 'provider-a', 'pending-bet', 'pending-bet', repeat('a', 64),
-			$2, 'player-pending-win-ref', 'round-1', 'game-1', 'BET', 'PENDING_REFERENCE', 1000, 'BRL',
-			'upstream-bet', 10000,
-			$3::timestamptz + INTERVAL '1 hour', $3::timestamptz + INTERVAL '2 hours',
-			$3::timestamptz, $3::timestamptz)
+			$2, 'player-pending-win-ref', 'round-1', 'game-1', 'BET', 'PENDING', 1000, 'BRL',
+			10000, $3::timestamptz, $3::timestamptz)
 	`, referenceID, walletID, now)
 	if err != nil {
 		t.Fatalf("insert pending BET: %v", err)
