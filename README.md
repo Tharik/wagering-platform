@@ -513,13 +513,31 @@ source .env.example
 set +a
 ```
 
-## Production notes
+## Production deployment security
 
-The application includes developer-friendly defaults for localhost PostgreSQL, LocalStack queue URLs, the local Keycloak issuer, and `us-east-1`. Production deployments should configure all environment-specific dependencies explicitly rather than relying on those defaults.
+### Implemented application guarantees
 
-LocalStack uses disposable `AWS_ACCESS_KEY_ID=test` and `AWS_SECRET_ACCESS_KEY=test` values only because the AWS SDK requires credentials when signing local requests. Production AWS authentication uses the standard SDK credential chain; IAM roles or workload identities with short-lived credentials are recommended instead of static long-lived keys.
+- The AWS SDK v2 uses its default credential provider chain. Production composition does not install a static credential provider, and application code contains no hardcoded AWS access key or secret. `SQS_ENDPOINT` only selects an endpoint override; it does not replace credential resolution.
+- JWTs are verified using configured OIDC discovery or JWKS, including signature, exact issuer, `wagering-api` audience, expiry, and not-before (`nbf`) validation. Authenticated client identity comes from `azp`, with `client_id` as fallback.
+- Provider clients and `wagering-internal` are allowlisted. Provider endpoints reject the internal client, internal endpoints reject provider clients, and provider identity in a request body or URL must match the authenticated provider principal.
+- The application does not intentionally log bearer tokens, Authorization headers, AWS/database credentials, client secrets, complete HTTP request bodies, or complete SQS message bodies.
 
-The imported Keycloak realm and its client secrets are also local-development fixtures. Production requires managed identity configuration, secret management, TLS, restricted queue policies, and appropriate encryption. The least-privilege SQS permission model is documented in [ARCHITECTURE.md](ARCHITECTURE.md).
+### Deployment responsibilities
+
+These controls are deployment recommendations and are not enforced by the application itself:
+
+- Prefer IAM roles or workload identity with short-lived AWS credentials. Scope permissions to exact queue ARNs and avoid `Resource: "*"` where deployment tooling can identify those resources.
+- Grant the command consumer `sqs:ReceiveMessage`, `sqs:DeleteMessage`, and `sqs:ChangeMessageVisibility` on the command queue. Readiness additionally requires `sqs:GetQueueAttributes` on that queue. Grant the Outbox publisher `sqs:SendMessage` on the event queue and the DLQ monitor `sqs:GetQueueAttributes` on the command DLQ.
+- The production runtime does not require queue creation, deletion, or configuration permissions merely because local bootstrap and integration tests use them.
+- Inbound SQS commands are not OIDC-authenticated, and `data.providerId` is trusted from the command message. IAM and queue policies are therefore part of the authentication boundary: grant `sqs:SendMessage` on the inbound command queue only to trusted producers and scope it to the exact command queue ARN.
+- In normal AWS deployments, leave `SQS_ENDPOINT` unset unless an intentional, trusted compatible endpoint is required. Use encrypted, trusted transport for production infrastructure; this is a deployment property rather than an application-level AWS TLS guarantee.
+- Compose credentials are disposable local-development values: LocalStack `test/test`, Keycloak administrator `admin/admin`, PostgreSQL `wagering/wagering`, and Keycloak clients `provider-a-secret`, `provider-b-secret`, and `internal-secret`. None of these deterministic credentials should be reused in production.
+- Inject production secrets through a secret manager, workload secret mechanism, or equivalent rather than committing them to source or container images.
+- Use HTTPS or otherwise trusted transport for production OIDC issuer discovery and JWKS retrieval. Store client secrets securely, configure deliberate token lifetimes and client-secret rotation, and support normal IdP signing-key rotation through trusted discovery or JWKS.
+- Use TLS for PostgreSQL and validate the server certificate. Inject `DATABASE_URL` securely, restrict database network access, and rotate credentials.
+- Give the application a dedicated runtime role with only required data privileges. Use a distinct migration role or schema-owner role for DDL; the runtime role should not be a superuser or own schema migrations.
+
+The detailed least-privilege SQS permission model is documented in [ARCHITECTURE.md](ARCHITECTURE.md).
 
 ## Architecture documentation
 

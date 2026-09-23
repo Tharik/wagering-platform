@@ -259,6 +259,8 @@ HTTP returns `401` for missing or invalid authentication and `403` for authoriza
 
 SQS preserves a separate trusted-message boundary: `data.providerId` is passed to the application service without applying HTTP/OIDC behavior.
 
+Inbound SQS messages are not OIDC-authenticated. Permission to publish to the command queue is therefore part of the trust boundary. Production IAM and queue policies should grant `sqs:SendMessage` only to trusted command producers and scope it to the exact command queue ARN.
+
 ## Messaging security and IAM
 
 Runtime modules share one AWS identity today, but their permissions are separable:
@@ -348,9 +350,11 @@ Migration version and dirty state are stored in PostgreSQL. A failed/dirty migra
 
 Migrations include explicit up/down definitions, but rollback is schema- and data-compatibility dependent. They allow the same ordered history to be reproduced on a fresh database when those compatibility preconditions hold. Migration `000006` is a concrete example: referenced `WIN` data is valid in version 6 but violates the older REFUND/ROLLBACK-only reference constraint restored by its down migration. PostgreSQL therefore rejects that rollback until operators deliberately resolve or migrate the incompatible data. This is normal forward-schema compatibility behavior, not a financial-integrity defect. Database constraints, triggers, enum values, and indexes remain versioned alongside application expectations.
 
+Production PostgreSQL should use TLS with server-certificate validation. Its runtime data-access role should be separate from the migration role or schema-owner role used for DDL. Local Compose intentionally uses disposable development credentials and does not model this production privilege separation.
+
 ## Observability and health
 
-The application emits structured JSON logs with selected identifiers such as correlation ID, message ID, transaction ID, wallet ID, and provider ID. It does not log AWS credentials, bearer tokens, or complete SQS message bodies. Complete financial request payloads are intentionally excluded.
+The application emits structured JSON logs with selected identifiers such as correlation ID, message ID, transaction ID, wallet ID, and provider ID. It does not intentionally log AWS credentials, bearer tokens, Authorization headers, client secrets, complete HTTP request bodies, or complete SQS message bodies. Complete financial request payloads are intentionally excluded.
 
 Prometheus-compatible metrics cover wager outcomes, replay counts, processing latency, SQS retries/errors, DLQ depth, concurrency conflicts, Outbox publication/retries/lag, and reconciliation divergence.
 
