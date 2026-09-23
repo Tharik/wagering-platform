@@ -20,6 +20,8 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
       localstack:
         condition: service_healthy
       keycloak:
@@ -30,6 +32,18 @@ services:
       timeout: 3s
       retries: 20
       start_period: 5s
+
+  migrate:
+    image: migrate/migrate:v4.19.1
+    command:
+      - -path=/migrations
+      - -database=postgres://wagering:wagering@postgres:5432/wagering?sslmode=disable
+      - up
+    depends_on:
+      postgres:
+        condition: service_healthy
+    volumes:
+      - ./migrations:/migrations:ro
 
   postgres:
     image: postgres:17-alpine

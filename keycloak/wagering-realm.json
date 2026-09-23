@@ -1,6 +1,7 @@
 {
   "realm": "wagering",
   "enabled": true,
+  "sslRequired": "none",
   "clients": [
     {
       "clientId": "wagering-api",

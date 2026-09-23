@@ -56,9 +56,8 @@ Build and start PostgreSQL, LocalStack, Keycloak, and the application:
 docker compose up --build
 ```
 
-Until migration startup is automated, a fresh database must be migrated with
-the command in the Database migrations section. After applying migrations,
-restart the application service with `docker compose restart app`.
+The one-shot migration service applies all pending database migrations before
+the application starts.
 
 Check the services:
 
@@ -126,25 +125,46 @@ set +a
 
 ## Database migrations
 
-Migrations live under `migrations/` and are deliberately plain SQL.
+Migrations live under `migrations/` and are deliberately plain SQL. The
+one-shot `migrate` service records the current version in PostgreSQL and runs
+automatically during `docker compose up --build`.
 
-Apply them in order:
-
-```bash
-for migration in migrations/*.up.sql; do
-  docker compose exec -T postgres \
-    psql -U wagering -d wagering -v ON_ERROR_STOP=1 < "$migration"
-done
-```
-
-Revert them in reverse order:
+Apply all pending migrations explicitly:
 
 ```bash
-for migration in $(find migrations -name '*.down.sql' | sort -r); do
-  docker compose exec -T postgres \
-    psql -U wagering -d wagering -v ON_ERROR_STOP=1 < "$migration"
-done
+docker compose run --rm migrate \
+  -path=/migrations \
+  -database='postgres://wagering:wagering@postgres:5432/wagering?sslmode=disable' \
+  up
 ```
+
+Revert the latest migration:
+
+```bash
+docker compose run --rm migrate \
+  -path=/migrations \
+  -database='postgres://wagering:wagering@postgres:5432/wagering?sslmode=disable' \
+  down 1
+```
+
+Inspect the current migration version:
+
+```bash
+docker compose run --rm migrate \
+  -path=/migrations \
+  -database='postgres://wagering:wagering@postgres:5432/wagering?sslmode=disable' \
+  version
+```
+
+Migration state is stored in the `schema_migrations` table. A failed migration
+is recorded as dirty and blocks subsequent migrations until an operator
+inspects the failure and deliberately repairs the state. The normal workflow
+does not force migration versions.
+
+Databases migrated manually before the migration runner was introduced have no
+version history. For local development, recreate their Compose volume with
+`docker compose down -v`, or baseline them only after an operator has verified
+that their schema exactly matches the intended version.
 
 The migrations cover:
 
@@ -152,8 +172,11 @@ The migrations cover:
 2. Database-enforced ledger immutability.
 3. Reference transaction and reversal support.
 4. Single-successful-reversal enforcement.
+5. Correlation and causation metadata for pending references.
+6. Referenced WIN transaction support.
 
-After reverting all migrations, they can be applied again using the UP command above.
+After reverting a migration, it can be applied again using the UP command
+above.
 
 ## Running the application
 
@@ -520,7 +543,8 @@ The operation remains durable as `PENDING_REFERENCE` and is retried by the backg
 
 ## Testing
 
-Start the local infrastructure and apply migrations before running integration tests.
+Start the local stack before running integration tests. Migrations are applied
+automatically before the application starts.
 
 Run the complete test suite:
 
