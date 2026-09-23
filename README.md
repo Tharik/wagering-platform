@@ -558,6 +558,17 @@ Run repeatedly to expose timing or isolation issues:
 go test ./... -p=1 -count=3
 ```
 
+Run the process-level concurrency harness:
+
+```bash
+./scripts/multi-instance-test.sh
+```
+
+This starts three independent application containers and verifies wallet
+locking, cross-instance idempotency, conflicts, and independent-wallet
+processing through HTTP with direct PostgreSQL invariant checks. The stack is
+left running after the harness completes.
+
 Run the race detector:
 
 ```bash
