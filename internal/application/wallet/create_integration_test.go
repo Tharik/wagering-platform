@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/Tharik/wagering-platform/internal/application/eventpayload"
 	"github.com/Tharik/wagering-platform/internal/domain"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
@@ -209,59 +210,54 @@ func assertOpeningOutboxContract(
 	assertEventEnvelope(t, balanceChanged, "WalletBalanceChanged", walletID)
 
 	processedData := eventData(t, processed)
+	var processedPayload eventpayload.WagerTransactionProcessedData
+	decodeEventData(t, processedData, &processedPayload)
 
-	if processedData["walletId"] != walletID {
+	if processedPayload.WalletID != walletID {
 		t.Fatalf(
 			"processed event walletId: expected %s, got %v",
 			walletID,
-			processedData["walletId"],
+			processedPayload.WalletID,
 		)
 	}
 
-	if processedData["kind"] != "OPENING" {
+	if processedPayload.Kind != "OPENING" {
 		t.Fatalf(
 			"processed event kind: expected OPENING, got %v",
-			processedData["kind"],
+			processedPayload.Kind,
 		)
 	}
 
-	transactionID, ok := processedData["transactionId"].(string)
-	if !ok || transactionID == "" {
+	transactionID := processedPayload.TransactionID
+	if transactionID == "" {
 		t.Fatalf(
 			"processed event transactionId must be a non-empty string, got %v",
-			processedData["transactionId"],
+			transactionID,
 		)
 	}
 
 	balanceData := eventData(t, balanceChanged)
-
-	expectedBalanceData := map[string]any{
-		"walletId":      walletID,
-		"transactionId": transactionID,
-		"direction":     "CREDIT",
-		"amount":        "100.00",
-		"currency":      "BRL",
-		"balanceBefore": "0.00",
-		"balanceAfter":  "100.00",
+	if _, exists := balanceData["amount"]; exists {
+		t.Fatal("WalletBalanceChanged data must not contain legacy amount")
+	}
+	if _, exists := balanceData["currency"]; exists {
+		t.Fatal("WalletBalanceChanged data must not contain legacy currency")
+	}
+	if len(balanceData) != 7 {
+		t.Fatalf("expected exactly 7 WalletBalanceChanged fields, got %d", len(balanceData))
 	}
 
-	for key, expected := range expectedBalanceData {
-		if balanceData[key] != expected {
-			t.Fatalf(
-				"balance event %s: expected %v, got %v",
-				key,
-				expected,
-				balanceData[key],
-			)
-		}
-	}
-
-	// JSON numbers decode into float64 when unmarshalling into map[string]any.
-	if balanceData["walletVersion"] != float64(1) {
-		t.Fatalf(
-			"balance event walletVersion: expected 1, got %v",
-			balanceData["walletVersion"],
-		)
+	var balancePayload eventpayload.WalletBalanceChangedData
+	decodeEventData(t, balanceData, &balancePayload)
+	expectedMoney := eventpayload.Money{Amount: "100.00", Currency: "BRL"}
+	if balancePayload.WalletID != walletID ||
+		balancePayload.TransactionID != transactionID ||
+		balancePayload.Direction != "CREDIT" ||
+		balancePayload.Money != expectedMoney ||
+		balancePayload.BalanceBefore != (eventpayload.Money{Amount: "0.00", Currency: "BRL"}) ||
+		balancePayload.BalanceAfter != expectedMoney ||
+		balancePayload.WalletVersion != 1 {
+		t.Fatalf("unexpected opening WalletBalanceChanged data: %+v", balancePayload)
 	}
 
 	if processed["correlationId"] != balanceChanged["correlationId"] {
@@ -366,6 +362,17 @@ func eventData(
 	}
 
 	return data
+}
+
+func decodeEventData(t *testing.T, data map[string]any, target any) {
+	t.Helper()
+	payload, err := json.Marshal(data)
+	if err != nil {
+		t.Fatalf("marshal event data: %v", err)
+	}
+	if err := json.Unmarshal(payload, target); err != nil {
+		t.Fatalf("decode event data: %v", err)
+	}
 }
 
 func TestCreateZeroBalanceWalletDoesNotCreateOpeningMovement(t *testing.T) {

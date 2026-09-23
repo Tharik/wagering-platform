@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/Tharik/wagering-platform/internal/application/eventpayload"
 	"github.com/Tharik/wagering-platform/internal/domain"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
@@ -115,11 +116,11 @@ func insertPendingReferenceEvent(
 	cmd ProcessCommand,
 	now time.Time,
 ) error {
-	payload := map[string]any{
-		"transactionId":                  transactionID.String(),
-		"providerId":                     cmd.Request.ProviderID,
-		"externalTransactionId":          cmd.Request.ExternalTransactionID,
-		"referenceExternalTransactionId": cmd.Request.ReferenceExternalTransactionID,
+	payload := eventpayload.WagerTransactionPendingReferenceData{
+		TransactionID:                  transactionID.String(),
+		ProviderID:                     cmd.Request.ProviderID,
+		ExternalTransactionID:          cmd.Request.ExternalTransactionID,
+		ReferenceExternalTransactionID: cmd.Request.ReferenceExternalTransactionID,
 	}
 
 	if err := insertOutboxEvent(

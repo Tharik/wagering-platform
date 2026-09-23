@@ -660,20 +660,16 @@ func rejectPendingReference(
 		)
 	}
 
-	if err := insertOutboxEvent(
+	if err := insertRejectedEvent(
 		ctx,
 		tx,
 		pending.ID,
-		"WagerTransactionRejected",
+		wallet.ID,
+		pending.Request.ProviderID,
+		pending.Request.Kind,
+		failureCode,
 		pending.CorrelationID,
 		pending.CausationID,
-		map[string]any{
-			"transactionId": pending.ID.String(),
-			"walletId":      wallet.ID,
-			"providerId":    pending.Request.ProviderID,
-			"kind":          string(pending.Request.Kind),
-			"failureCode":   failureCode,
-		},
 		now,
 	); err != nil {
 		return err

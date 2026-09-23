@@ -9,6 +9,7 @@ import (
 	"log/slog"
 	"time"
 
+	"github.com/Tharik/wagering-platform/internal/application/eventpayload"
 	"github.com/Tharik/wagering-platform/internal/domain"
 	"github.com/Tharik/wagering-platform/internal/observability"
 	"github.com/google/uuid"
@@ -232,10 +233,10 @@ func createOpeningTransaction(
 		walletID,
 		"WagerTransactionProcessed",
 		correlationID,
-		map[string]any{
-			"transactionId": transactionID.String(),
-			"walletId":      walletID.String(),
-			"kind":          "OPENING",
+		eventpayload.WagerTransactionProcessedData{
+			TransactionID: transactionID.String(),
+			WalletID:      walletID.String(),
+			Kind:          "OPENING",
 		},
 		now,
 	); err != nil {
@@ -248,15 +249,14 @@ func createOpeningTransaction(
 		walletID,
 		"WalletBalanceChanged",
 		correlationID,
-		map[string]any{
-			"walletId":      walletID.String(),
-			"transactionId": transactionID.String(),
-			"direction":     "CREDIT",
-			"amount":        initialBalance.String(),
-			"currency":      string(initialBalance.Currency()),
-			"balanceBefore": "0.00",
-			"balanceAfter":  initialBalance.String(),
-			"walletVersion": int64(1),
+		eventpayload.WalletBalanceChangedData{
+			WalletID:      walletID.String(),
+			TransactionID: transactionID.String(),
+			Direction:     "CREDIT",
+			Money:         eventpayload.NewMoney(initialBalance),
+			BalanceBefore: eventpayload.NewMoney(domain.Zero(initialBalance.Currency())),
+			BalanceAfter:  eventpayload.NewMoney(initialBalance),
+			WalletVersion: 1,
 		},
 		now,
 	); err != nil {
@@ -272,7 +272,7 @@ func insertOutboxEvent(
 	aggregateID uuid.UUID,
 	eventType string,
 	correlationID string,
-	data map[string]any,
+	data any,
 	now time.Time,
 ) error {
 	eventID := uuid.New()

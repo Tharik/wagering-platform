@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/Tharik/wagering-platform/internal/application/eventpayload"
 	"github.com/Tharik/wagering-platform/internal/domain"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
@@ -80,20 +81,16 @@ func persistRejectedTransaction(
 		)
 	}
 
-	if err := insertOutboxEvent(
+	if err := insertRejectedEvent(
 		ctx,
 		tx,
 		transactionID,
-		"WagerTransactionRejected",
+		wallet.ID,
+		cmd.Request.ProviderID,
+		cmd.Request.Kind,
+		failureCode,
 		cmd.CorrelationID,
 		cmd.CausationID,
-		map[string]any{
-			"transactionId": transactionID.String(),
-			"walletId":      wallet.ID,
-			"providerId":    cmd.Request.ProviderID,
-			"kind":          string(cmd.Request.Kind),
-			"failureCode":   failureCode,
-		},
 		now,
 	); err != nil {
 		return ProcessResult{}, err
@@ -127,10 +124,10 @@ func insertProcessedEvents(
 		"WagerTransactionProcessed",
 		correlationID,
 		causationID,
-		map[string]any{
-			"transactionId": transactionID.String(),
-			"walletId":      wallet.ID,
-			"kind":          string(kind),
+		eventpayload.WagerTransactionProcessedData{
+			TransactionID: transactionID.String(),
+			WalletID:      wallet.ID,
+			Kind:          string(kind),
 		},
 		now,
 	); err != nil {
@@ -149,15 +146,14 @@ func insertProcessedEvents(
 		"WalletBalanceChanged",
 		correlationID,
 		causationID,
-		map[string]any{
-			"walletId":      wallet.ID,
-			"transactionId": transactionID.String(),
-			"direction":     direction,
-			"amount":        amount.String(),
-			"currency":      string(amount.Currency()),
-			"balanceBefore": balanceBefore.String(),
-			"balanceAfter":  wallet.Balance.String(),
-			"walletVersion": wallet.Version,
+		eventpayload.WalletBalanceChangedData{
+			WalletID:      wallet.ID,
+			TransactionID: transactionID.String(),
+			Direction:     direction,
+			Money:         eventpayload.NewMoney(amount),
+			BalanceBefore: eventpayload.NewMoney(balanceBefore),
+			BalanceAfter:  eventpayload.NewMoney(wallet.Balance),
+			WalletVersion: wallet.Version,
 		},
 		now,
 	); err != nil {
@@ -167,6 +163,36 @@ func insertProcessedEvents(
 	return nil
 }
 
+func insertRejectedEvent(
+	ctx context.Context,
+	tx pgx.Tx,
+	transactionID uuid.UUID,
+	walletID string,
+	providerID string,
+	kind domain.WagerKind,
+	failureCode string,
+	correlationID string,
+	causationID string,
+	now time.Time,
+) error {
+	return insertOutboxEvent(
+		ctx,
+		tx,
+		transactionID,
+		"WagerTransactionRejected",
+		correlationID,
+		causationID,
+		eventpayload.WagerTransactionRejectedData{
+			TransactionID: transactionID.String(),
+			WalletID:      walletID,
+			ProviderID:    providerID,
+			Kind:          string(kind),
+			FailureCode:   failureCode,
+		},
+		now,
+	)
+}
+
 func insertOutboxEvent(
 	ctx context.Context,
 	tx pgx.Tx,
@@ -174,7 +200,7 @@ func insertOutboxEvent(
 	eventType string,
 	correlationID string,
 	causationID string,
-	data map[string]any,
+	data any,
 	now time.Time,
 ) error {
 	eventID := uuid.New()
