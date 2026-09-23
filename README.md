@@ -1,139 +1,328 @@
 # Wagering Platform
 
-A backend wagering platform implemented in Go with a focus on financial integrity, concurrency, idempotency, reliable messaging, and failure recovery.
+## Overview
 
-The service supports wallet management and wager processing through both HTTP and SQS while preserving the same transactional and idempotency guarantees across both channels.
+This repository implements a Go wagering service for wallets and `BET`, `WIN`, `LOSS`, `REFUND`, and `ROLLBACK` transactions. Commands can arrive through HTTP or SQS and share the same PostgreSQL-backed processing and idempotency rules.
 
-## Architecture overview
+Financial state is stored as integer minor units. Wallet mutation, wager state, ledger entries, Inbox records, and Outbox events are committed through explicit database transaction boundaries. PostgreSQL row locking protects concurrent wallet updates, while durable pending-reference processing handles out-of-order referenced transactions.
 
-The application is organized into the following layers:
+For detailed design decisions and trade-offs, see [ARCHITECTURE.md](ARCHITECTURE.md).
 
-- `internal/domain` — core domain concepts and invariants.
-- `internal/application` — wallet and wagering use cases.
-- `internal/infrastructure/httpapi` — HTTP API, authentication, health checks, and metrics.
-- `internal/infrastructure/messaging` — SQS consumer/publisher, Inbox, and transactional Outbox.
-- `internal/infrastructure/postgres` — PostgreSQL infrastructure.
-- `internal/worker` — background workers.
-- `cmd/wagering-api` — Uber Fx composition root and application lifecycle.
+## Architecture at a glance
 
-PostgreSQL is the source of truth for wallets, wagers, idempotency records, Inbox, Outbox, and the financial ledger.
+- Go and Uber Fx provide the application and lifecycle wiring.
+- PostgreSQL is the source of truth for wallets, wagers, the append-only ledger, Inbox, Outbox, and pending-reference state.
+- Keycloak provides OAuth2/OIDC client-credentials authentication and provider isolation.
+- LocalStack supplies local SQS FIFO queues and dead-letter queues.
+- A durable Inbox protects inbound at-least-once processing.
+- A transactional Outbox publishes committed events with stable event IDs.
+- Background workers consume commands, publish Outbox events, resolve pending references, and monitor the command DLQ.
 
-More detailed design decisions and trade-offs are documented in `ARCHITECTURE.md`.
+## Prerequisites
 
-## Main guarantees
+For the primary local workflow:
 
-The implementation provides:
+- Docker with Docker Compose
+- `curl` for the examples
 
-- Money represented as integer minor units internally; no floating-point arithmetic.
-- Persistent idempotency.
-- Per-wallet concurrency control using PostgreSQL row locking.
-- Atomic wallet, wager, ledger, Inbox, and Outbox operations where applicable.
-- Append-only financial ledger.
-- At-least-once SQS processing.
-- Transactional Outbox for reliable event publication.
-- Durable Inbox for message deduplication.
-- Durable pending-reference processing.
-- Full REFUND and ROLLBACK validation.
-- Protection against multiple successful reversals of the same transaction.
-- OAuth2/OIDC authentication using Keycloak.
-- Provider isolation based on authenticated identity.
-- Graceful worker shutdown through Uber Fx lifecycle hooks.
-- PostgreSQL and SQS readiness checks.
-- Structured JSON logging and Prometheus-compatible metrics.
+A local Go installation matching `go.mod` is required to run tests directly on the host. The token examples use standard shell tools and do not require `jq`.
 
-## Requirements
+## Quick start
 
-For local development, Docker and Docker Compose are sufficient to run the
-application stack. A local Go installation is only needed for running Go
-commands directly on the host. PostgreSQL client (`psql`) is optional because
-migrations can be executed through the PostgreSQL container.
-
-## Local infrastructure
-
-Build and start PostgreSQL, LocalStack, Keycloak, and the application:
+Build and start the complete local stack:
 
 ```bash
 docker compose up --build
 ```
 
-The one-shot migration service applies all pending database migrations before
-the application starts.
+On a fresh environment, Compose starts PostgreSQL, runs all migrations through the one-shot `migrate` service, imports the local Keycloak realm, provisions the LocalStack queues, and starts the application after its required dependencies are ready.
 
-Check the services:
+Local ports:
+
+| Service | Address |
+| --- | --- |
+| Wagering API | `http://localhost:8080` |
+| Keycloak | `http://localhost:8081` |
+| LocalStack | `http://localhost:4566` |
+| PostgreSQL | `localhost:5432` |
+
+From another terminal, check readiness:
+
+```bash
+curl -fsS http://localhost:8080/health/ready
+```
+
+Operational endpoints:
+
+| Endpoint | Purpose |
+| --- | --- |
+| `GET /health/live` | Process liveness |
+| `GET /health/ready` | PostgreSQL and command-queue readiness |
+| `GET /metrics` | Prometheus-compatible metrics |
+
+Inspect or stop the stack with:
 
 ```bash
 docker compose ps
+docker compose down
 ```
 
-The local environment provides:
+## Authentication
 
-- PostgreSQL on port `5432`
-- LocalStack on port `4566`
-- Keycloak on port `8081`
-- Wagering API on port `8080` when started with the default configuration
+Wallet administration and reconciliation require the `wagering-internal` client. Wagering endpoints require a provider client such as `provider-a`. The local realm issues tokens with the `wagering-api` audience.
 
-Keycloak imports the development realm automatically from:
-
-```text
-keycloak/wagering-realm.json
-```
-
-LocalStack creates the required SQS queues from:
-
-```text
-localstack/init/01-create-queues.sh
-```
-
-The command queue and DLQ are:
-
-```text
-wager-transactions.fifo
-wager-transactions-dlq.fifo
-```
-
-Outbound domain events are published to:
-
-```text
-wager-events.fifo
-```
-
-## Configuration
-
-The application works with local defaults, but all relevant external configuration can be overridden through environment variables.
-
-See `.env.example`.
-
-```text
-DATABASE_URL
-AWS_REGION
-SQS_ENDPOINT
-SQS_COMMANDS_QUEUE_URL
-SQS_COMMANDS_DLQ_URL
-SQS_EVENTS_QUEUE_URL
-OIDC_ISSUER
-OIDC_JWKS_URL
-HTTP_ADDRESS
-```
-
-To load the example configuration into the current shell:
+Export reusable local tokens:
 
 ```bash
-set -a
-source .env.example
-set +a
+TOKEN_URL=http://localhost:8081/realms/wagering/protocol/openid-connect/token
+
+INTERNAL_TOKEN=$(curl -fsS -X POST "$TOKEN_URL" \
+  -H 'Content-Type: application/x-www-form-urlencoded' \
+  -d 'grant_type=client_credentials' \
+  -d 'client_id=wagering-internal' \
+  -d 'client_secret=internal-secret' \
+  | sed -n 's/.*"access_token":"\([^"]*\)".*/\1/p')
+
+PROVIDER_TOKEN=$(curl -fsS -X POST "$TOKEN_URL" \
+  -H 'Content-Type: application/x-www-form-urlencoded' \
+  -d 'grant_type=client_credentials' \
+  -d 'client_id=provider-a' \
+  -d 'client_secret=provider-a-secret' \
+  | sed -n 's/.*"access_token":"\([^"]*\)".*/\1/p')
 ```
 
-For LocalStack, Docker Compose supplies `AWS_ACCESS_KEY_ID=test` and `AWS_SECRET_ACCESS_KEY=test`. These are disposable local values that exist only to satisfy AWS SDK and LocalStack behavior; they are not production credential examples.
+These client secrets are deterministic local-development credentials from `keycloak/wagering-realm.json`. They are not production secrets or production configuration examples.
 
-Local development through `.env.example` or Docker Compose explicitly sets `SQS_ENDPOINT` to LocalStack. Production normally leaves `SQS_ENDPOINT` unset so the AWS SDK uses the standard regional SQS endpoint; set it only for LocalStack or another intentional SQS-compatible endpoint override.
+## API examples
 
-Production deployments should use an IAM role or workload identity and short-lived credentials discovered through the standard AWS SDK credential chain, such as an ECS task role, EKS IRSA or Pod Identity, or an EC2 instance role. Static long-lived AWS access keys are not recommended.
+The following commands assume the stack is running and the token variables above are set.
+
+### Create and read a wallet
+
+Create a BRL wallet and capture its ID:
+
+```bash
+WALLET_RESPONSE=$(curl -fsS -X POST http://localhost:8080/wallets \
+  -H "Authorization: Bearer $INTERNAL_TOKEN" \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "playerId": "player-123",
+    "initialBalance": {
+      "amount": "100.00",
+      "currency": "BRL"
+    }
+  }')
+
+WALLET_ID=$(printf '%s' "$WALLET_RESPONSE" | sed -n 's/.*"id":"\([^"]*\)".*/\1/p')
+printf '%s\n' "$WALLET_RESPONSE"
+```
+
+Representative response:
+
+```json
+{
+  "id": "wallet-uuid",
+  "playerId": "player-123",
+  "balance": {
+    "amount": "100.00",
+    "currency": "BRL"
+  },
+  "version": 1
+}
+```
+
+Read it:
+
+```bash
+curl -fsS "http://localhost:8080/wallets/$WALLET_ID" \
+  -H "Authorization: Bearer $INTERNAL_TOKEN"
+```
+
+Wallets are unique by `(playerId, currency)`. Creating the same business key again returns `409 Conflict`.
+
+### Submit and read a BET
+
+Submit a `25.00` BET and capture the internal transaction ID:
+
+```bash
+WAGER_RESPONSE=$(curl -fsS -X POST http://localhost:8080/wagering/transactions \
+  -H "Authorization: Bearer $PROVIDER_TOKEN" \
+  -H 'Content-Type: application/json' \
+  -H 'Idempotency-Key: provider-a:bet-001' \
+  -d "{
+    \"providerId\": \"provider-a\",
+    \"externalTransactionId\": \"bet-001\",
+    \"playerId\": \"player-123\",
+    \"walletId\": \"$WALLET_ID\",
+    \"roundId\": \"round-987\",
+    \"gameId\": \"fortune-chimp\",
+    \"kind\": \"BET\",
+    \"money\": {
+      \"amount\": \"25.00\",
+      \"currency\": \"BRL\"
+    }
+  }")
+
+TRANSACTION_ID=$(printf '%s' "$WAGER_RESPONSE" | sed -n 's/.*"transactionId":"\([^"]*\)".*/\1/p')
+printf '%s\n' "$WAGER_RESPONSE"
+```
+
+Representative first-processing response (`201 Created`):
+
+```json
+{
+  "transactionId": "transaction-uuid",
+  "status": "PROCESSED",
+  "balance": {
+    "amount": "75.00",
+    "currency": "BRL"
+  },
+  "idempotentReplay": false
+}
+```
+
+Submitting the same header and canonical business payload again returns the original result with `200 OK` and `"idempotentReplay": true`.
+
+Read by internal transaction ID:
+
+```bash
+curl -fsS "http://localhost:8080/wagering/transactions/$TRANSACTION_ID" \
+  -H "Authorization: Bearer $PROVIDER_TOKEN"
+```
+
+Read by provider and external transaction identity:
+
+```bash
+curl -fsS http://localhost:8080/providers/provider-a/wagering/transactions/bet-001 \
+  -H "Authorization: Bearer $PROVIDER_TOKEN"
+```
+
+### Reconcile a wallet
+
+```bash
+curl -fsS -X POST "http://localhost:8080/wallets/$WALLET_ID/reconciliation" \
+  -H "Authorization: Bearer $INTERNAL_TOKEN"
+```
+
+The diagnostic response reports stored and ledger-calculated balances, their signed difference, consistency, and checked entry count. It does not mutate the wallet.
+
+Other wallet routes:
+
+```text
+GET /wallets/{id}/ledger?limit=50&cursor=...
+```
+
+Ledger pagination uses an opaque cursor.
+
+## Wagering contract and semantics
+
+### Wager kinds
+
+| Kind | Semantics |
+| --- | --- |
+| `BET` | Debits the wallet and requires sufficient funds. |
+| `WIN` | Credits the wallet. A reference is optional; when supplied it must identify a processed BET in the same provider, player, wallet, currency, and round context. |
+| `LOSS` | Records a processed result with amount `0.00` and no wallet movement. |
+| `REFUND` | Fully reverses a processed BET; partial refunds are not supported. |
+| `ROLLBACK` | Applies the opposite movement of an eligible processed BET, WIN, or REFUND; duplicate successful reversals are prevented. |
+
+`REFUND` and `ROLLBACK` require `referenceExternalTransactionId`. A referenced `WIN` supplies it optionally.
+
+### Money
+
+External money amounts are JSON strings in fixed decimal notation with exactly two decimal places. JSON numbers, signs, whitespace, and scientific notation are not accepted. Internally, amounts use signed 64-bit integer minor units and never floating-point arithmetic.
+
+Valid amounts:
+
+```json
+"10.00"
+"0.01"
+```
+
+Invalid amounts:
+
+```text
+10.00
+"10"
+"10.0"
+"1e2"
+```
+
+The external API currently supports `BRL`.
+
+### Idempotency
+
+- `Idempotency-Key` is required for HTTP wagering commands.
+- The same provider, key, and canonical business payload returns the original result.
+- Reusing the key with a different canonical business payload returns `409 Conflict`.
+- `(providerId, externalTransactionId)` is independently unique.
+- A successful replay does not duplicate wallet, ledger, or Outbox effects.
+
+See [ARCHITECTURE.md](ARCHITECTURE.md) for transaction boundaries and canonical payload/hash details.
+
+### Reference lifecycle
+
+A missing or unresolved eligible reference places the dependent wager in durable `PENDING_REFERENCE`. The resolver retries with persisted exponential backoff. If a valid processed reference becomes available, the dependent may become `PROCESSED`; an invalid terminal reference produces `REJECTED`.
+
+The pending-reference TTL is five minutes. Expiry produces terminal `REJECTED` with failure code `REFERENCE_EXPIRED`.
+
+The runtime actively writes `PENDING_REFERENCE`, `PROCESSED`, and `REJECTED`. `PENDING` and `FAILED` remain reserved compatibility states; deeper lifecycle semantics are documented in [ARCHITECTURE.md](ARCHITECTURE.md).
+
+### HTTP outcomes
+
+| Situation | HTTP behavior |
+| --- | --- |
+| Missing or invalid token | `401 Unauthorized` |
+| Provider/authorization mismatch | `403 Forbidden` |
+| Idempotency or external transaction conflict | `409 Conflict` |
+| First accepted wager processing | `201 Created` |
+| Idempotent replay | `200 OK` |
+| Business rejection such as insufficient funds | Successful processing response with `status: "REJECTED"` and a `failureCode` |
+| Unexpected infrastructure failure | `5xx` |
+
+## Messaging and LocalStack
+
+The primary queues are:
+
+| Queue | Purpose |
+| --- | --- |
+| `wager-transactions.fifo` | Inbound wager commands |
+| `wager-transactions-dlq.fifo` | Poison-command redrive target |
+| `wager-events.fifo` | Outbound committed events |
+
+The local bootstrap also provisions `wager-events-dlq.fifo`; the application does not currently monitor or consume it.
+
+Official inbound command shape:
+
+```json
+{
+  "messageId": "msg-123",
+  "type": "WagerTransactionRequested",
+  "occurredAt": "2026-09-08T12:00:00.000Z",
+  "data": {
+    "providerId": "provider-a",
+    "externalTransactionId": "transaction-123",
+    "idempotencyKey": "provider-a:transaction-123",
+    "playerId": "player-123",
+    "walletId": "wallet-uuid",
+    "roundId": "round-987",
+    "gameId": "fortune-chimp",
+    "kind": "BET",
+    "money": {
+      "amount": "25.00",
+      "currency": "BRL"
+    }
+  }
+}
+```
+
+Inbound delivery is at least once. Inbox registration, wagering work, and Inbox completion share the database transaction, and an SQS message is deleted only after that transaction commits. Poison commands are moved by the native SQS redrive policy after `maxReceiveCount`.
+
+Committed events are stored in the transactional Outbox before background publishers send them to `wager-events.fifo`. Publication is at least once; event IDs remain stable across retries for downstream deduplication.
 
 ## Database migrations
 
-Migrations live under `migrations/` and are deliberately plain SQL. The
-one-shot `migrate` service records the current version in PostgreSQL and runs
-automatically during `docker compose up --build`.
+Migrations are plain SQL under `migrations/`. `docker compose up --build` runs all pending migrations automatically before the application starts.
 
 Apply all pending migrations explicitly:
 
@@ -144,7 +333,7 @@ docker compose run --rm migrate \
   up
 ```
 
-Revert the latest migration:
+Revert one migration:
 
 ```bash
 docker compose run --rm migrate \
@@ -153,7 +342,7 @@ docker compose run --rm migrate \
   down 1
 ```
 
-Inspect the current migration version:
+Apply pending migrations again with the `up` command above. Inspect version and dirty state with:
 
 ```bash
 docker compose run --rm migrate \
@@ -162,500 +351,82 @@ docker compose run --rm migrate \
   version
 ```
 
-Migration state is stored in the `schema_migrations` table. A failed migration
-is recorded as dirty and blocks subsequent migrations until an operator
-inspects the failure and deliberately repairs the state. The normal workflow
-does not force migration versions.
-
-Databases migrated manually before the migration runner was introduced have no
-version history. For local development, recreate their Compose volume with
-`docker compose down -v`, or baseline them only after an operator has verified
-that their schema exactly matches the intended version.
-
-The migrations cover:
-
-1. Initial wallet, wager, ledger, Inbox, and Outbox schema.
-2. Database-enforced ledger immutability.
-3. Reference transaction and reversal support.
-4. Single-successful-reversal enforcement.
-5. Correlation and causation metadata for pending references.
-6. Referenced WIN transaction support.
-
-After reverting a migration, it can be applied again using the UP command
-above.
-
-## Running the application
-
-To run the application directly on the host after the infrastructure is
-running and migrations have been applied:
-
-```bash
-go run ./cmd/wagering-api
-```
-
-The default HTTP address is:
-
-```text
-:8080
-```
-
-A different instance can be started using another address:
-
-```bash
-HTTP_ADDRESS=:8082 go run ./cmd/wagering-api
-```
-
-This is useful for validating multi-instance concurrency behavior.
-
-## Authentication
-
-The API uses OAuth2/OIDC with Keycloak.
-
-The local Keycloak realm contains development clients for:
-
-```text
-provider-a
-provider-b
-wagering-internal
-```
-
-The provider identity is derived from the validated access token. A caller cannot select another provider by simply changing a request field.
-
-Provider clients are used for wagering operations, while the internal client is used for wallet administration and reconciliation.
-
-The realm configuration under `keycloak/wagering-realm.json` is intended for local development only. Its development credentials must not be used in a production environment.
-
-A client-credentials token can be obtained from the local Keycloak token endpoint using the corresponding client ID and secret configured in the realm file.
-
-Example:
-
-```bash
-curl -s \
-  -X POST \
-  "http://localhost:8081/realms/wagering/protocol/openid-connect/token" \
-  -H "Content-Type: application/x-www-form-urlencoded" \
-  -d "grant_type=client_credentials" \
-  -d "client_id=provider-a" \
-  -d "client_secret=provider-a-secret"
-```
-
-The API validates the token issuer and the `wagering-api` audience.
-
-## HTTP API
-
-### Health
-
-```text
-GET /health/live
-GET /health/ready
-```
-
-Readiness checks both PostgreSQL and SQS.
-
-### Metrics
-
-```text
-GET /metrics
-```
-
-The endpoint exposes Prometheus-compatible metrics.
-
-### Wallets
-
-Internal authentication is required.
-
-```text
-POST /wallets
-GET /wallets/{walletId}
-GET /wallets/{walletId}/ledger
-POST /wallets/{walletId}/reconciliation
-```
-
-Ledger pagination supports `limit` and an opaque `cursor`.
-
-Example:
-
-```text
-GET /wallets/{walletId}/ledger?limit=50&cursor=...
-```
-
-### Wagering
-
-Provider authentication is required.
-
-```text
-POST /wagering/transactions
-GET /wagering/transactions/{transactionId}
-GET /providers/{providerId}/wagering/transactions/{externalTransactionId}
-```
-
-Supported wager types:
-
-```text
-BET
-WIN
-LOSS
-REFUND
-ROLLBACK
-```
-
-## Money
-
-External monetary values are represented as fixed two-decimal strings.
-
-The domain rejects invalid representations such as:
-
-- negative values;
-- excessive decimal scale;
-- scientific notation;
-- NaN or Infinity.
-
-Internally, money is stored as signed 64-bit integer minor units.
-
-This avoids floating-point rounding errors in wallet and ledger operations.
-
-## Wallet and ledger
-
-Each wallet is unique by:
-
-```text
-(playerId, currency)
-```
-
-Wallet balances cannot become negative.
-
-Every successful financial movement produces an append-only ledger entry containing the balance before and after the movement.
-
-The database enforces ledger immutability through triggers preventing UPDATE and DELETE operations.
-
-Opening a wallet with a positive initial balance creates an internal `OPENING` transaction, ledger entry, and corresponding Outbox events atomically.
-
-A zero opening balance creates no financial movement.
-
-## Concurrency
-
-Wallet mutation uses PostgreSQL row-level locking.
-
-Operations affecting the same wallet are serialized by the database, while operations against different wallets can proceed independently.
-
-This design does not depend on in-memory mutexes or a single application instance.
-
-The implementation was validated with multiple independent database pools and with three separate application processes sharing the same PostgreSQL database.
-
-For a wallet containing `100.00`, two concurrent distinct BET requests of `80.00` result in:
-
-```text
-one PROCESSED
-one REJECTED with INSUFFICIENT_FUNDS
-final balance = 20.00
-one debit ledger movement
-```
-
-Replaying either request does not create an additional financial movement.
-
-## Idempotency
-
-Idempotency is persisted in PostgreSQL.
-
-Requests are normalized before their canonical request hash is calculated.
-
-A replay of the same logical operation returns the original result without changing the wallet or creating another ledger entry.
-
-Reusing the same idempotency identity with a different canonical payload is rejected.
-
-HTTP and SQS processing share the same wagering use case and persistent idempotency guarantees.
-
-## REFUND and ROLLBACK
-
-A REFUND reverses a successfully processed BET.
-
-A ROLLBACK reverses a successfully processed BET, WIN, or REFUND using the opposite financial movement.
-
-Reference validation includes:
-
-- provider;
-- player;
-- wallet;
-- currency;
-- round;
-- reference transaction state and type.
-
-Partial reversals are not supported.
-
-The database prevents more than one successful REFUND/ROLLBACK reversal for the same referenced transaction.
-
-If a reversal requires a debit and the wallet does not contain sufficient funds, it is rejected with a distinct insufficient-funds result.
-
-## Pending references
-
-A REFUND or ROLLBACK may arrive before the referenced transaction because delivery is at least once and messages may arrive out of order.
-
-Instead of immediately rejecting such a request, the transaction enters:
-
-```text
-PENDING_REFERENCE
-```
-
-The state is durable in PostgreSQL.
-
-A background resolver retries eligible pending transactions with backoff. Processing survives application restarts because retry state is persisted.
-
-If the reference becomes available, the transaction is resolved normally.
-
-If the configured retry/expiry policy is exhausted, the transaction becomes `REJECTED`.
-
-Multiple resolver instances safely coordinate through PostgreSQL locking.
-
-## SQS processing
-
-Inbound wagering messages are consumed from:
-
-```text
-wager-transactions.fifo
-```
-
-The message envelope contains:
-
-```json
-{
-  "messageId": "...",
-  "type": "...",
-  "occurredAt": "...",
-  "data": {}
-}
-```
-
-The consumer uses a persistent Inbox keyed by consumer name and message ID.
-
-Inbox registration, wager processing, and Inbox completion occur within the same database transaction.
-
-The SQS message is deleted only after the database transaction commits successfully.
-
-Therefore, a crash after commit but before `DeleteMessage` causes a redelivery that is safely recognized as a replay rather than creating a second financial movement.
-
-Repeated processing failures are handled by the queue redrive policy and eventually move the message to:
-
-```text
-wager-transactions-dlq.fifo
-```
-
-## Transactional Outbox
-
-Domain events are written to the Outbox in the same PostgreSQL transaction as the corresponding business state.
-
-Background publishers claim unpublished records and publish them to SQS.
-
-Events are marked as published only after successful publication.
-
-If the process crashes after sending an event but before marking the Outbox record as published, the event may be published again. This is intentional at-least-once behavior.
-
-The event ID remains stable across publication retries so downstream consumers can deduplicate safely.
-
-Multiple Outbox publishers coordinate through PostgreSQL locking.
-
-## Events
-
-Outbound events use an envelope containing:
-
-```text
-eventId
-eventType
-aggregateId
-correlationId
-causationId
-occurredAt
-version
-data
-```
-
-Events include transaction processing/rejection, wallet balance changes, and pending-reference state changes.
-
-## Reconciliation
-
-The reconciliation endpoint reconstructs the expected wallet balance from the ledger and compares it with the current wallet state.
-
-It also validates ledger continuity and movement arithmetic.
-
-Reconciliation is diagnostic: it reports divergence but does not silently modify financial state.
-
-Detected divergences are exposed through metrics.
-
-## Observability
-
-Application logs use structured JSON.
-
-Where available, contextual fields include:
-
-```text
-correlationId
-messageId
-transactionId
-walletId
-providerId
-```
-
-Logs intentionally avoid complete financial payloads and sensitive authentication data.
-
-Metrics include:
-
-- wager results by status;
-- idempotent replays;
-- processing latency;
-- SQS retries and processing errors;
-- DLQ message count;
-- concurrency conflicts;
-- Outbox publications, retries, errors, and lag;
-- reconciliation divergences.
-
-## Failure and recovery scenarios
-
-### PostgreSQL unavailable
-
-Readiness becomes unhealthy and transactional processing cannot proceed.
-
-### SQS unavailable
-
-Readiness becomes unhealthy. Outbox records remain durable in PostgreSQL and can be retried after SQS becomes available again.
-
-For local testing:
-
-```bash
-docker compose stop localstack
-```
-
-After restarting it:
-
-```bash
-docker compose start localstack
-```
-
-readiness should recover automatically.
-
-### Consumer crash after database commit
-
-The SQS message is redelivered because it was not deleted.
-
-The Inbox and persistent wagering idempotency prevent duplicate financial effects.
-
-### Outbox publisher crash after publish
-
-The Outbox record may be published again because it was not marked as published.
-
-The stable event ID allows downstream deduplication.
-
-### Missing reference
-
-The operation remains durable as `PENDING_REFERENCE` and is retried by the background resolver.
+A dirty migration state blocks normal subsequent migration until an operator investigates and repairs it deliberately.
 
 ## Testing
 
-Start the local stack before running integration tests. Migrations are applied
-automatically before the application starts.
-
-Run the complete test suite:
+Start the local stack before running the integration suite. Tests use real PostgreSQL, Keycloak, and LocalStack services and isolate their PostgreSQL schemas by package.
 
 ```bash
-go test ./... -p=1
+go test ./...
+go test ./... -count=3
+go test -race ./...
+go vet ./...
+gofmt -l $(find . -name '*.go' -not -path './.git/*')
+git diff --check
 ```
 
-Run repeatedly to expose timing or isolation issues:
+The suite covers financial concurrency, idempotency races, provider isolation, HTTP/SQS cross-channel identity, Inbox/Outbox recovery, SQS retry/redrive, pending references, reconciliation, migrations, graceful shutdown, and process-level multi-instance behavior.
 
-```bash
-go test ./... -p=1 -count=3
-```
+## Multi-instance verification
 
-Run the process-level concurrency harness:
+Run the supported harness:
 
 ```bash
 ./scripts/multi-instance-test.sh
 ```
 
-This starts three independent application containers and verifies wallet
-locking, cross-instance idempotency, conflicts, and independent-wallet
-processing through HTTP with direct PostgreSQL invariant checks. The stack is
-left running after the harness completes.
+It starts three independent application containers and repeats the process-level checks three times. The harness verifies two concurrent `80.00` BETs against a `100.00` wallet, cross-instance idempotency, independent-wallet processing, and direct database invariants. It leaves the Compose stack running for inspection.
 
-Run the race detector:
+## Failure and recovery
 
-```bash
-go test -race ./... -p=1
-```
+- **Idempotent replay:** a repeated HTTP or SQS command returns the persisted result without another financial effect.
+- **Poison command:** processing failures leave the SQS message undeleted; native redrive eventually moves it to `wager-transactions-dlq.fifo`.
+- **Pending reference:** retry metadata and expiry are durable, so resolution continues after restart or on another instance.
+- **Outbox retry:** committed unpublished events remain in PostgreSQL and are retried; a crash after send may produce an at-least-once duplicate with the same event ID.
+- **Graceful shutdown:** workers stop accepting new work, in-flight context-aware processing drains within the configured lifecycle deadline, and PostgreSQL resources close after workers stop.
 
-Run static analysis:
+See [ARCHITECTURE.md](ARCHITECTURE.md) for exact failure windows and transaction guarantees.
 
-```bash
-go vet ./...
-```
+## Configuration
 
-Check formatting:
+| Variable | Purpose | Local default/example | Production guidance |
+| --- | --- | --- | --- |
+| `DATABASE_URL` | PostgreSQL connection | `postgres://wagering:wagering@localhost:5432/wagering?sslmode=disable` | Set an environment-specific connection with appropriate TLS and secret handling. |
+| `AWS_REGION` | AWS SDK region | `us-east-1` | Set the deployment region explicitly when it differs. |
+| `SQS_ENDPOINT` | Optional SQS-compatible endpoint override | `.env.example`: `http://localhost:4566`; Compose: `http://localstack:4566` | Normally leave unset so the SDK uses the regional AWS SQS endpoint. |
+| `SQS_COMMANDS_QUEUE_URL` | Inbound command queue URL | LocalStack `wager-transactions.fifo` URL | Set the provisioned AWS queue URL. |
+| `SQS_COMMANDS_DLQ_URL` | Command DLQ URL | LocalStack `wager-transactions-dlq.fifo` URL | Set the provisioned AWS DLQ URL. |
+| `SQS_EVENTS_QUEUE_URL` | Outbound event queue URL | LocalStack `wager-events.fifo` URL | Set the provisioned AWS event queue URL. |
+| `OIDC_ISSUER` | Trusted token issuer | `http://localhost:8081/realms/wagering` | Set the production issuer exactly. |
+| `OIDC_JWKS_URL` | Optional explicit JWKS endpoint | Empty for issuer discovery; Compose uses the internal Keycloak URL | Leave empty for discovery or set a trusted reachable JWKS endpoint. |
+| `HTTP_ADDRESS` | HTTP listen address | `:8080` | Set according to the runtime/network environment. |
 
-```bash
-gofmt -w ./cmd ./internal
-```
-
-Check whitespace errors before committing:
-
-```bash
-git diff --check
-```
-
-The integration suite exercises real PostgreSQL, Keycloak, and LocalStack infrastructure.
-
-It covers, among other scenarios:
-
-- repeated identical wagers;
-- same-wallet concurrent debits;
-- concurrent operations on different wallets;
-- concurrent REFUND/ROLLBACK attempts;
-- Inbox concurrency;
-- multiple Outbox publishers;
-- SQS redelivery after commit;
-- DLQ redrive;
-- pending-reference resolution and expiry;
-- pending-reference recovery after application restart;
-- OAuth2/OIDC provider isolation;
-- HTTP/SQS cross-channel idempotency;
-- reconciliation divergence;
-- ledger pagination.
-
-Because integration tests use shared local infrastructure, do not leave a separately running wagering application consuming the same development resources while executing the complete test suite.
-
-## Multi-instance validation
-
-The service does not rely on process-local synchronization.
-
-Multiple instances can be started against the same PostgreSQL and SQS infrastructure:
+`.env.example` is intentionally a local-development configuration:
 
 ```bash
-HTTP_ADDRESS=:8082 go run ./cmd/wagering-api
-HTTP_ADDRESS=:8083 go run ./cmd/wagering-api
-HTTP_ADDRESS=:8084 go run ./cmd/wagering-api
+set -a
+source .env.example
+set +a
 ```
 
-Requests sent concurrently through different instances still use PostgreSQL as the concurrency authority.
+## Production notes
 
-The same-wallet `100.00` / two concurrent `80.00` BET scenario was validated across separate application processes.
+The application includes developer-friendly defaults for localhost PostgreSQL, LocalStack queue URLs, the local Keycloak issuer, and `us-east-1`. Production deployments should configure all environment-specific dependencies explicitly rather than relying on those defaults.
 
-## Graceful shutdown
+LocalStack uses disposable `AWS_ACCESS_KEY_ID=test` and `AWS_SECRET_ACCESS_KEY=test` values only because the AWS SDK requires credentials when signing local requests. Production AWS authentication uses the standard SDK credential chain; IAM roles or workload identities with short-lived credentials are recommended instead of static long-lived keys.
 
-Uber Fx owns application startup and shutdown.
+The imported Keycloak realm and its client secrets are also local-development fixtures. Production requires managed identity configuration, secret management, TLS, restricted queue policies, and appropriate encryption. The least-privilege SQS permission model is documented in [ARCHITECTURE.md](ARCHITECTURE.md).
 
-On shutdown:
+## Architecture documentation
 
-1. the shared worker context is cancelled;
-2. background workers stop;
-3. the application waits for worker termination;
-4. the HTTP server shuts down;
-5. PostgreSQL resources are released through the Fx lifecycle.
+For deeper design details, see [ARCHITECTURE.md](ARCHITECTURE.md), including:
 
-The HTTP listener is acquired synchronously during startup. If the configured port cannot be bound, application startup fails instead of leaving background workers running without a functional HTTP server.
-
-## Local development notes
-
-The Keycloak realm contains development-only client credentials.
-
-LocalStack uses development AWS credentials and must not be treated as production security configuration.
-
-The architecture intentionally favors database-backed correctness over process-local coordination so the service remains safe when multiple instances are running.
-
-See `ARCHITECTURE.md` for the detailed design, transactional boundaries, failure semantics, and trade-offs.
+- transaction boundaries and wallet row locking;
+- financial concurrency and database constraints;
+- Inbox and transactional Outbox behavior;
+- reference lifecycle and resolver coordination;
+- SQS retries, redrive, and recovery windows;
+- messaging security and least-privilege IAM;
+- application lifecycle and graceful shutdown;
+- deliberate trade-offs and remaining limitations.
