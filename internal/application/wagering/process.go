@@ -478,7 +478,7 @@ func (s *Service) ProcessTx(
 	if err != nil {
 		return ProcessResult{}, fmt.Errorf(
 			"insert wager transaction: %w",
-			err,
+			mapWagerUniqueViolation(err),
 		)
 	}
 

@@ -686,6 +686,106 @@ func TestOIDCAuthenticationAndProviderIsolation(t *testing.T) {
 		}
 	})
 
+	t.Run("idempotency key with different payload returns conflict", func(t *testing.T) {
+		response := doWagerRequest(
+			t,
+			ctx,
+			testServer.URL+"/wagering/transactions",
+			providerAToken,
+			"provider-a-auth-test",
+			wagerBody("different-payload-external", walletID),
+		)
+		defer response.Body.Close()
+
+		if response.StatusCode != http.StatusConflict {
+			t.Fatalf("expected 409, got %d: %s", response.StatusCode, readBody(t, response))
+		}
+		var result map[string]string
+		decodeJSON(t, response, &result)
+		if result["error"] != "idempotency conflict" {
+			t.Fatalf("expected idempotency conflict, got %q", result["error"])
+		}
+	})
+
+	t.Run("duplicate external transaction returns conflict", func(t *testing.T) {
+		response := doWagerRequest(
+			t,
+			ctx,
+			testServer.URL+"/wagering/transactions",
+			providerAToken,
+			"different-idempotency-key",
+			wagerBody(providerAExternalTransactionID, walletID),
+		)
+		defer response.Body.Close()
+
+		if response.StatusCode != http.StatusConflict {
+			t.Fatalf("expected 409, got %d: %s", response.StatusCode, readBody(t, response))
+		}
+		var result map[string]string
+		decodeJSON(t, response, &result)
+		if result["error"] != "external transaction already exists" {
+			t.Fatalf("expected external transaction conflict, got %q", result["error"])
+		}
+	})
+
+	t.Run("durable wager rejection remains a normal response", func(t *testing.T) {
+		body := wagerBody("insufficient-funds-bet", walletID)
+		body["money"] = map[string]any{"amount": "1000.00", "currency": "BRL"}
+
+		response := doWagerRequest(
+			t,
+			ctx,
+			testServer.URL+"/wagering/transactions",
+			providerAToken,
+			"insufficient-funds-bet",
+			body,
+		)
+		defer response.Body.Close()
+
+		if response.StatusCode != http.StatusCreated {
+			t.Fatalf("expected 201, got %d: %s", response.StatusCode, readBody(t, response))
+		}
+		var result struct {
+			Status      string   `json:"status"`
+			FailureCode string   `json:"failureCode"`
+			Balance     moneyDTO `json:"balance"`
+		}
+		decodeJSON(t, response, &result)
+		if result.Status != "REJECTED" || result.FailureCode != "INSUFFICIENT_FUNDS" || result.Balance.Amount != "90.00" {
+			t.Fatalf("unexpected rejected wager response: %+v", result)
+		}
+	})
+
+	t.Run("missing wallet returns not found", func(t *testing.T) {
+		response := doRequest(
+			t,
+			ctx,
+			http.MethodGet,
+			testServer.URL+"/wallets/00000000-0000-0000-0000-000000000099",
+			internalToken,
+			nil,
+		)
+		defer response.Body.Close()
+		if response.StatusCode != http.StatusNotFound {
+			t.Fatalf("expected 404, got %d: %s", response.StatusCode, readBody(t, response))
+		}
+	})
+
+	t.Run("missing wager returns not found", func(t *testing.T) {
+		response := doRequest(
+			t,
+			ctx,
+			http.MethodGet,
+			testServer.URL+"/wagering/transactions/00000000-0000-0000-0000-000000000099",
+			providerAToken,
+			nil,
+		)
+		defer response.Body.Close()
+		if response.StatusCode != http.StatusNotFound {
+			t.Fatalf("expected 404, got %d: %s", response.StatusCode, readBody(t, response))
+		}
+	})
+
 	t.Run("internal client cannot read provider wager", func(t *testing.T) {
 		response := doRequest(
 			t,
@@ -913,6 +1013,7 @@ func TestOIDCAuthenticationAndProviderIsolation(t *testing.T) {
 			FROM wager_transactions
 			WHERE wallet_id = $1
 			  AND kind = 'BET'
+			  AND state = 'PROCESSED'
 			`,
 			walletID,
 		).Scan(&betCount)

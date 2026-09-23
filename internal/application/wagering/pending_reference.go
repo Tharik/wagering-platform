@@ -87,7 +87,7 @@ func persistPendingReference(
 	if err != nil {
 		return ProcessResult{}, fmt.Errorf(
 			"insert pending reference transaction: %w",
-			err,
+			mapWagerUniqueViolation(err),
 		)
 	}
 

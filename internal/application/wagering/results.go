@@ -76,7 +76,7 @@ func persistRejectedTransaction(
 	if err != nil {
 		return ProcessResult{}, fmt.Errorf(
 			"insert rejected wager transaction: %w",
-			err,
+			mapWagerUniqueViolation(err),
 		)
 	}
 

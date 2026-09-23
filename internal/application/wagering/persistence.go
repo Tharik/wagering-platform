@@ -8,7 +8,31 @@ import (
 
 	"github.com/Tharik/wagering-platform/internal/domain"
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 )
+
+const (
+	wagerIdempotencyUniqueConstraint      = "wager_idempotency_unique"
+	wagerExternalIdentityUniqueConstraint = "wager_external_identity_unique"
+)
+
+func mapWagerUniqueViolation(err error) error {
+	var pgErr *pgconn.PgError
+	if !errors.As(err, &pgErr) || pgErr.Code != "23505" {
+		return err
+	}
+
+	switch pgErr.ConstraintName {
+	case wagerIdempotencyUniqueConstraint:
+		return ErrIdempotencyConflict
+
+	case wagerExternalIdentityUniqueConstraint:
+		return ErrExternalTransactionExists
+
+	default:
+		return err
+	}
+}
 
 func findIdempotentReplay(
 	ctx context.Context,
