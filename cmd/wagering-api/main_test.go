@@ -4,6 +4,7 @@ import (
 	"context"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"strings"
 	"testing"
 	"time"
@@ -11,6 +12,40 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/sqs"
 	"go.uber.org/fx"
 )
+
+func TestLoadConfigSQSEndpoint(t *testing.T) {
+	t.Run("unset leaves endpoint override empty", func(t *testing.T) {
+		original, existed := os.LookupEnv("SQS_ENDPOINT")
+		if err := os.Unsetenv("SQS_ENDPOINT"); err != nil {
+			t.Fatalf("unset SQS_ENDPOINT: %v", err)
+		}
+		t.Cleanup(func() {
+			if existed {
+				_ = os.Setenv("SQS_ENDPOINT", original)
+				return
+			}
+			_ = os.Unsetenv("SQS_ENDPOINT")
+		})
+
+		if endpoint := loadConfig().SQSEndpoint; endpoint != "" {
+			t.Fatalf("expected no endpoint override, got %q", endpoint)
+		}
+	})
+
+	t.Run("explicit empty leaves endpoint override empty", func(t *testing.T) {
+		t.Setenv("SQS_ENDPOINT", "")
+		if endpoint := loadConfig().SQSEndpoint; endpoint != "" {
+			t.Fatalf("expected no endpoint override, got %q", endpoint)
+		}
+	})
+
+	t.Run("explicit endpoint is preserved", func(t *testing.T) {
+		t.Setenv("SQS_ENDPOINT", "http://localhost:4566")
+		if endpoint := loadConfig().SQSEndpoint; endpoint != "http://localhost:4566" {
+			t.Fatalf("expected explicit endpoint override, got %q", endpoint)
+		}
+	})
+}
 
 func TestSQSClientUsesDefaultCredentialChain(t *testing.T) {
 	t.Setenv("AWS_ACCESS_KEY_ID", "environment-access-key")

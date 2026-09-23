@@ -125,6 +125,8 @@ set +a
 
 For LocalStack, Docker Compose supplies `AWS_ACCESS_KEY_ID=test` and `AWS_SECRET_ACCESS_KEY=test`. These are disposable local values that exist only to satisfy AWS SDK and LocalStack behavior; they are not production credential examples.
 
+Local development through `.env.example` or Docker Compose explicitly sets `SQS_ENDPOINT` to LocalStack. Production normally leaves `SQS_ENDPOINT` unset so the AWS SDK uses the standard regional SQS endpoint; set it only for LocalStack or another intentional SQS-compatible endpoint override.
+
 Production deployments should use an IAM role or workload identity and short-lived credentials discovered through the standard AWS SDK credential chain, such as an ECS task role, EKS IRSA or Pod Identity, or an EC2 instance role. Static long-lived AWS access keys are not recommended.
 
 ## Database migrations

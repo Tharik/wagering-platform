@@ -9,8 +9,7 @@ import (
 const (
 	defaultDatabaseURL = "postgres://wagering:wagering@localhost:5432/wagering?sslmode=disable"
 
-	defaultAWSRegion   = "us-east-1"
-	defaultSQSEndpoint = "http://localhost:4566"
+	defaultAWSRegion = "us-east-1"
 
 	defaultCommandsQueueURL = "http://sqs.us-east-1.localhost.localstack.cloud:4566/000000000000/wager-transactions.fifo"
 	defaultCommandsDLQURL   = "http://sqs.us-east-1.localhost.localstack.cloud:4566/000000000000/wager-transactions-dlq.fifo"
@@ -47,10 +46,7 @@ func loadConfig() config {
 			"AWS_REGION",
 			defaultAWSRegion,
 		),
-		SQSEndpoint: envOrDefault(
-			"SQS_ENDPOINT",
-			defaultSQSEndpoint,
-		),
+		SQSEndpoint: os.Getenv("SQS_ENDPOINT"),
 		CommandsQueueURL: envOrDefault(
 			"SQS_COMMANDS_QUEUE_URL",
 			defaultCommandsQueueURL,
