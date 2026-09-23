@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"io"
 	"log/slog"
+	"math"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -15,6 +16,7 @@ import (
 
 	wageringapp "github.com/Tharik/wagering-platform/internal/application/wagering"
 	walletapp "github.com/Tharik/wagering-platform/internal/application/wallet"
+	"github.com/Tharik/wagering-platform/internal/domain"
 	"github.com/Tharik/wagering-platform/internal/observability"
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/credentials"
@@ -510,6 +512,127 @@ func TestOIDCAuthenticationAndProviderIsolation(t *testing.T) {
 
 		if openingCount != 0 || ledgerCount != 0 || outboxCount != 0 {
 			t.Fatalf("unexpected zero-balance effects: transactions=%d ledger=%d outbox=%d", openingCount, ledgerCount, outboxCount)
+		}
+	})
+
+	t.Run("post-parse credit overflow returns bad request without side effects", func(t *testing.T) {
+		const (
+			playerID   = "player-credit-overflow"
+			externalID = "win-credit-overflow"
+		)
+
+		parsedAmount, err := domain.ParseMoney("0.01", domain.BRL)
+		if err != nil {
+			t.Fatalf("parse valid WIN amount: %v", err)
+		}
+		if parsedAmount.Amount() != 1 {
+			t.Fatalf("expected one minor unit, got %d", parsedAmount.Amount())
+		}
+
+		createResponse := doRequest(
+			t,
+			ctx,
+			http.MethodPost,
+			testServer.URL+"/wallets",
+			internalToken,
+			map[string]any{
+				"playerId": playerID,
+				"initialBalance": map[string]any{
+					"amount":   "92233720368547758.07",
+					"currency": "BRL",
+				},
+			},
+		)
+		defer createResponse.Body.Close()
+
+		if createResponse.StatusCode != http.StatusCreated {
+			t.Fatalf("expected wallet create 201, got %d: %s", createResponse.StatusCode, readBody(t, createResponse))
+		}
+
+		var created struct {
+			ID      string `json:"id"`
+			Version int64  `json:"version"`
+		}
+		decodeJSON(t, createResponse, &created)
+
+		var balanceBefore int64
+		var versionBefore int64
+		if err := pool.QueryRow(ctx, `SELECT balance, version FROM wallets WHERE id = $1`, created.ID).Scan(&balanceBefore, &versionBefore); err != nil {
+			t.Fatalf("query maximum wallet before WIN: %v", err)
+		}
+		if balanceBefore != math.MaxInt64 || versionBefore != created.Version {
+			t.Fatalf("unexpected maximum wallet state: balance=%d version=%d", balanceBefore, versionBefore)
+		}
+
+		var wagersBefore int
+		var ledgerBefore int
+		var outboxBefore int
+		if err := pool.QueryRow(ctx, `SELECT COUNT(*) FROM wager_transactions`).Scan(&wagersBefore); err != nil {
+			t.Fatalf("count wagers before overflow WIN: %v", err)
+		}
+		if err := pool.QueryRow(ctx, `SELECT COUNT(*) FROM ledger_entries`).Scan(&ledgerBefore); err != nil {
+			t.Fatalf("count ledger before overflow WIN: %v", err)
+		}
+		if err := pool.QueryRow(ctx, `SELECT COUNT(*) FROM outbox_events`).Scan(&outboxBefore); err != nil {
+			t.Fatalf("count outbox before overflow WIN: %v", err)
+		}
+
+		body := wagerBody(externalID, created.ID)
+		body["playerId"] = playerID
+		body["kind"] = "WIN"
+		body["money"] = map[string]any{
+			"amount":   "0.01",
+			"currency": "BRL",
+		}
+
+		response := doWagerRequest(
+			t,
+			ctx,
+			testServer.URL+"/wagering/transactions",
+			providerAToken,
+			"win-credit-overflow",
+			body,
+		)
+		defer response.Body.Close()
+
+		if response.StatusCode != http.StatusBadRequest {
+			t.Fatalf("expected 400, got %d: %s", response.StatusCode, readBody(t, response))
+		}
+
+		var balanceAfter int64
+		var versionAfter int64
+		if err := pool.QueryRow(ctx, `SELECT balance, version FROM wallets WHERE id = $1`, created.ID).Scan(&balanceAfter, &versionAfter); err != nil {
+			t.Fatalf("query maximum wallet after WIN: %v", err)
+		}
+		if balanceAfter != balanceBefore || versionAfter != versionBefore {
+			t.Fatalf("wallet changed: before=(%d,%d) after=(%d,%d)", balanceBefore, versionBefore, balanceAfter, versionAfter)
+		}
+
+		var attemptedWagers int
+		if err := pool.QueryRow(ctx, `SELECT COUNT(*) FROM wager_transactions WHERE provider_id = 'provider-a' AND external_transaction_id = $1`, externalID).Scan(&attemptedWagers); err != nil {
+			t.Fatalf("count overflow WIN rows: %v", err)
+		}
+		if attemptedWagers != 0 {
+			t.Fatalf("expected no overflow WIN row, got %d", attemptedWagers)
+		}
+
+		var wagersAfter int
+		var ledgerAfter int
+		var outboxAfter int
+		if err := pool.QueryRow(ctx, `SELECT COUNT(*) FROM wager_transactions`).Scan(&wagersAfter); err != nil {
+			t.Fatalf("count wagers after overflow WIN: %v", err)
+		}
+		if err := pool.QueryRow(ctx, `SELECT COUNT(*) FROM ledger_entries`).Scan(&ledgerAfter); err != nil {
+			t.Fatalf("count ledger after overflow WIN: %v", err)
+		}
+		if err := pool.QueryRow(ctx, `SELECT COUNT(*) FROM outbox_events`).Scan(&outboxAfter); err != nil {
+			t.Fatalf("count outbox after overflow WIN: %v", err)
+		}
+		if wagersAfter != wagersBefore || ledgerAfter != ledgerBefore || outboxAfter != outboxBefore {
+			t.Fatalf(
+				"persistence changed: wagers %d->%d ledger %d->%d outbox %d->%d",
+				wagersBefore, wagersAfter, ledgerBefore, ledgerAfter, outboxBefore, outboxAfter,
+			)
 		}
 	})
 

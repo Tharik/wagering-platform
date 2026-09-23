@@ -449,6 +449,7 @@ func writeWagerError(
 		errors.Is(err, domain.ErrInvalidLossAmount),
 		errors.Is(err, domain.ErrWagerReferenceRequired),
 		errors.Is(err, domain.ErrWagerReferenceNotAllowed),
+		errors.Is(err, domain.ErrMoneyOverflow),
 		errors.Is(err, domain.ErrCurrencyMismatch):
 
 		writeJSON(

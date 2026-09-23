@@ -46,8 +46,9 @@ func TestWagerTransactionConstraintsRejectInvalidRows(t *testing.T) {
 	pool := openConstraintTestPool(t, ctx)
 	walletID := insertConstraintTestWallet(t, ctx, pool)
 	reference := validExternalConstraintRow(walletID, "BET", "PROCESSED", 1000)
-	reference.externalTransactionID = "reference-bet"
-	reference.idempotencyKey = "reference-bet"
+	referenceExternalID := "reference-bet-" + uuid.NewString()
+	reference.externalTransactionID = referenceExternalID
+	reference.idempotencyKey = "reference-bet-" + uuid.NewString()
 	insertConstraintRow(t, ctx, pool, reference)
 
 	tests := []struct {
@@ -64,8 +65,8 @@ func TestWagerTransactionConstraintsRejectInvalidRows(t *testing.T) {
 		{name: "OPENING carrying external metadata", constraint: originMetadataConstraint, mutate: func(row *wagerConstraintRow) {
 			*row = validOpeningConstraintRow(walletID)
 			row.providerID = "provider-a"
-			row.externalTransactionID = "opening-external"
-			row.idempotencyKey = "opening-idempotency"
+			row.externalTransactionID = "opening-external-" + uuid.NewString()
+			row.idempotencyKey = "opening-idempotency-" + uuid.NewString()
 		}},
 		{name: "OPENING not processed", constraint: originMetadataConstraint, mutate: func(row *wagerConstraintRow) {
 			*row = validOpeningConstraintRow(walletID)
@@ -95,18 +96,18 @@ func TestWagerTransactionConstraintsRejectInvalidRows(t *testing.T) {
 		{name: "REFUND zero", constraint: amountByKindConstraint, mutate: func(row *wagerConstraintRow) {
 			row.kind = "REFUND"
 			row.amount = 0
-			row.referenceExternalTransactionID = "reference-bet"
+			row.referenceExternalTransactionID = referenceExternalID
 		}},
 		{name: "ROLLBACK zero", constraint: amountByKindConstraint, mutate: func(row *wagerConstraintRow) {
 			row.kind = "ROLLBACK"
 			row.amount = 0
-			row.referenceExternalTransactionID = "reference-bet"
+			row.referenceExternalTransactionID = referenceExternalID
 		}},
-		{name: "BET with external reference", constraint: referenceApplicabilityConstraint, mutate: func(row *wagerConstraintRow) { row.referenceExternalTransactionID = "reference-bet" }},
+		{name: "BET with external reference", constraint: referenceApplicabilityConstraint, mutate: func(row *wagerConstraintRow) { row.referenceExternalTransactionID = referenceExternalID }},
 		{name: "LOSS with external reference", constraint: referenceApplicabilityConstraint, mutate: func(row *wagerConstraintRow) {
 			row.kind = "LOSS"
 			row.amount = 0
-			row.referenceExternalTransactionID = "reference-bet"
+			row.referenceExternalTransactionID = referenceExternalID
 		}},
 		{name: "BET with internal reference", constraint: referenceApplicabilityConstraint, mutate: func(row *wagerConstraintRow) { row.referencedTransactionID = reference.id }},
 		{name: "LOSS with internal reference", constraint: referenceApplicabilityConstraint, mutate: func(row *wagerConstraintRow) {
@@ -139,18 +140,21 @@ func TestWagerTransactionConstraintsAcceptValidRows(t *testing.T) {
 	insertConstraintRow(t, ctx, pool, validOpeningConstraintRow(walletID))
 
 	referenceForWin := validExternalConstraintRow(walletID, "BET", "PROCESSED", 1000)
-	referenceForWin.externalTransactionID = "bet-for-win"
-	referenceForWin.idempotencyKey = "bet-for-win"
+	referenceForWinExternalID := "bet-for-win-" + uuid.NewString()
+	referenceForWin.externalTransactionID = referenceForWinExternalID
+	referenceForWin.idempotencyKey = "bet-for-win-" + uuid.NewString()
 	insertConstraintRow(t, ctx, pool, referenceForWin)
 
 	referenceForRefund := validExternalConstraintRow(walletID, "BET", "PROCESSED", 1000)
-	referenceForRefund.externalTransactionID = "bet-for-refund"
-	referenceForRefund.idempotencyKey = "bet-for-refund"
+	referenceForRefundExternalID := "bet-for-refund-" + uuid.NewString()
+	referenceForRefund.externalTransactionID = referenceForRefundExternalID
+	referenceForRefund.idempotencyKey = "bet-for-refund-" + uuid.NewString()
 	insertConstraintRow(t, ctx, pool, referenceForRefund)
 
 	referenceForRollback := validExternalConstraintRow(walletID, "BET", "PROCESSED", 1000)
-	referenceForRollback.externalTransactionID = "bet-for-rollback"
-	referenceForRollback.idempotencyKey = "bet-for-rollback"
+	referenceForRollbackExternalID := "bet-for-rollback-" + uuid.NewString()
+	referenceForRollback.externalTransactionID = referenceForRollbackExternalID
+	referenceForRollback.idempotencyKey = "bet-for-rollback-" + uuid.NewString()
 	insertConstraintRow(t, ctx, pool, referenceForRollback)
 
 	validRows := []struct {
@@ -160,12 +164,12 @@ func TestWagerTransactionConstraintsAcceptValidRows(t *testing.T) {
 		{name: "BET", row: validExternalConstraintRow(walletID, "BET", "PROCESSED", 1000)},
 		{name: "WIN without reference", row: validExternalConstraintRow(walletID, "WIN", "PROCESSED", 1000)},
 		{name: "WIN unresolved reference", row: withExternalReference(validExternalConstraintRow(walletID, "WIN", "PENDING_REFERENCE", 1000), "missing-bet")},
-		{name: "WIN resolved reference", row: withResolvedReference(validExternalConstraintRow(walletID, "WIN", "PROCESSED", 1000), "bet-for-win", referenceForWin.id)},
+		{name: "WIN resolved reference", row: withResolvedReference(validExternalConstraintRow(walletID, "WIN", "PROCESSED", 1000), referenceForWinExternalID, referenceForWin.id)},
 		{name: "LOSS zero", row: validExternalConstraintRow(walletID, "LOSS", "PROCESSED", 0)},
 		{name: "REFUND pending reference", row: withExternalReference(validExternalConstraintRow(walletID, "REFUND", "PENDING_REFERENCE", 1000), "missing-refund-bet")},
-		{name: "REFUND resolved reference", row: withResolvedReference(validExternalConstraintRow(walletID, "REFUND", "PROCESSED", 1000), "bet-for-refund", referenceForRefund.id)},
+		{name: "REFUND resolved reference", row: withResolvedReference(validExternalConstraintRow(walletID, "REFUND", "PROCESSED", 1000), referenceForRefundExternalID, referenceForRefund.id)},
 		{name: "ROLLBACK pending reference", row: withExternalReference(validExternalConstraintRow(walletID, "ROLLBACK", "PENDING_REFERENCE", 1000), "missing-rollback-wager")},
-		{name: "ROLLBACK resolved reference", row: withResolvedReference(validExternalConstraintRow(walletID, "ROLLBACK", "PROCESSED", 1000), "bet-for-rollback", referenceForRollback.id)},
+		{name: "ROLLBACK resolved reference", row: withResolvedReference(validExternalConstraintRow(walletID, "ROLLBACK", "PROCESSED", 1000), referenceForRollbackExternalID, referenceForRollback.id)},
 		{name: "reserved PENDING", row: validExternalConstraintRow(walletID, "BET", "PENDING", 1000)},
 		{name: "reserved FAILED", row: validExternalConstraintRow(walletID, "BET", "FAILED", 1000)},
 	}
