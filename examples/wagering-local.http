@@ -1,0 +1,486 @@
+# Wagering Platform - local manual scenarios
+# VS Code REST Client (humao.rest-client)
+# Run authInternal, authProviderA and authProviderB first.
+# Then run createWallet. Change runId before repeating without resetting the DB.
+
+@api = http://localhost:8080
+@keycloak = http://localhost:8081
+@runId = local-001
+@playerId = player-{{runId}}
+
+###
+# @name healthReady
+GET {{api}}/health/ready
+
+###
+# @name healthLive
+GET {{api}}/health/live
+
+###
+# @name metrics
+GET {{api}}/metrics
+
+###############################################################################
+# AUTH
+###############################################################################
+
+###
+# @name authInternal
+POST {{keycloak}}/realms/wagering/protocol/openid-connect/token
+Content-Type: application/x-www-form-urlencoded
+
+grant_type=client_credentials&client_id=wagering-internal&client_secret=internal-secret
+
+###
+# @name authProviderA
+POST {{keycloak}}/realms/wagering/protocol/openid-connect/token
+Content-Type: application/x-www-form-urlencoded
+
+grant_type=client_credentials&client_id=provider-a&client_secret=provider-a-secret
+
+###
+# @name authProviderB
+POST {{keycloak}}/realms/wagering/protocol/openid-connect/token
+Content-Type: application/x-www-form-urlencoded
+
+grant_type=client_credentials&client_id=provider-b&client_secret=provider-b-secret
+
+###############################################################################
+# WALLET
+###############################################################################
+
+###
+# @name createWallet
+POST {{api}}/wallets
+Authorization: Bearer {{authInternal.response.body.$.access_token}}
+Content-Type: application/json
+
+{
+  "playerId": "{{playerId}}",
+  "initialBalance": {
+    "amount": "100.00",
+    "currency": "BRL"
+  }
+}
+
+###
+# Expect 200, balance 100.00
+# @name getWalletInitial
+GET {{api}}/wallets/{{createWallet.response.body.$.id}}
+Authorization: Bearer {{authInternal.response.body.$.access_token}}
+
+###############################################################################
+# BASIC WAGER FLOW
+###############################################################################
+
+###
+# BET 25.00 -> expect 201 PROCESSED, balance 75.00
+# @name bet25
+POST {{api}}/wagering/transactions
+Authorization: Bearer {{authProviderA.response.body.$.access_token}}
+Content-Type: application/json
+Idempotency-Key: provider-a:{{runId}}:bet-001
+
+{
+  "providerId": "provider-a",
+  "externalTransactionId": "{{runId}}-bet-001",
+  "playerId": "{{playerId}}",
+  "walletId": "{{createWallet.response.body.$.id}}",
+  "roundId": "{{runId}}-round-001",
+  "gameId": "fortune-chimp",
+  "kind": "BET",
+  "money": {
+    "amount": "25.00",
+    "currency": "BRL"
+  }
+}
+
+###
+# Exact replay -> expect 200, same transactionId, idempotentReplay=true
+# @name bet25Replay
+POST {{api}}/wagering/transactions
+Authorization: Bearer {{authProviderA.response.body.$.access_token}}
+Content-Type: application/json
+Idempotency-Key: provider-a:{{runId}}:bet-001
+
+{
+  "providerId": "provider-a",
+  "externalTransactionId": "{{runId}}-bet-001",
+  "playerId": "{{playerId}}",
+  "walletId": "{{createWallet.response.body.$.id}}",
+  "roundId": "{{runId}}-round-001",
+  "gameId": "fortune-chimp",
+  "kind": "BET",
+  "money": {
+    "amount": "25.00",
+    "currency": "BRL"
+  }
+}
+
+###
+# Same key, different payload -> expect 409
+# @name idempotencyConflict
+POST {{api}}/wagering/transactions
+Authorization: Bearer {{authProviderA.response.body.$.access_token}}
+Content-Type: application/json
+Idempotency-Key: provider-a:{{runId}}:bet-001
+
+{
+  "providerId": "provider-a",
+  "externalTransactionId": "{{runId}}-bet-001",
+  "playerId": "{{playerId}}",
+  "walletId": "{{createWallet.response.body.$.id}}",
+  "roundId": "{{runId}}-round-001",
+  "gameId": "fortune-chimp",
+  "kind": "BET",
+  "money": {
+    "amount": "26.00",
+    "currency": "BRL"
+  }
+}
+
+###
+# Insufficient funds after bet25 -> expect 201 REJECTED / INSUFFICIENT_FUNDS / 75.00
+# @name bet80Rejected
+POST {{api}}/wagering/transactions
+Authorization: Bearer {{authProviderA.response.body.$.access_token}}
+Content-Type: application/json
+Idempotency-Key: provider-a:{{runId}}:bet-080
+
+{
+  "providerId": "provider-a",
+  "externalTransactionId": "{{runId}}-bet-080",
+  "playerId": "{{playerId}}",
+  "walletId": "{{createWallet.response.body.$.id}}",
+  "roundId": "{{runId}}-round-080",
+  "gameId": "fortune-chimp",
+  "kind": "BET",
+  "money": {
+    "amount": "80.00",
+    "currency": "BRL"
+  }
+}
+
+###
+# WIN without reference -> expect 201 PROCESSED, balance 85.00
+# @name win10
+POST {{api}}/wagering/transactions
+Authorization: Bearer {{authProviderA.response.body.$.access_token}}
+Content-Type: application/json
+Idempotency-Key: provider-a:{{runId}}:win-010
+
+{
+  "providerId": "provider-a",
+  "externalTransactionId": "{{runId}}-win-010",
+  "playerId": "{{playerId}}",
+  "walletId": "{{createWallet.response.body.$.id}}",
+  "roundId": "{{runId}}-round-win",
+  "gameId": "fortune-chimp",
+  "kind": "WIN",
+  "money": {
+    "amount": "10.00",
+    "currency": "BRL"
+  }
+}
+
+###
+# LOSS zero -> expect 201 PROCESSED, balance still 85.00
+# @name lossZero
+POST {{api}}/wagering/transactions
+Authorization: Bearer {{authProviderA.response.body.$.access_token}}
+Content-Type: application/json
+Idempotency-Key: provider-a:{{runId}}:loss-001
+
+{
+  "providerId": "provider-a",
+  "externalTransactionId": "{{runId}}-loss-001",
+  "playerId": "{{playerId}}",
+  "walletId": "{{createWallet.response.body.$.id}}",
+  "roundId": "{{runId}}-round-loss",
+  "gameId": "fortune-chimp",
+  "kind": "LOSS",
+  "money": {
+    "amount": "0.00",
+    "currency": "BRL"
+  }
+}
+
+###############################################################################
+# REVERSALS
+###############################################################################
+
+###
+# REFUND original BET -> expect 201 PROCESSED, balance 110.00
+# @name refundBet25
+POST {{api}}/wagering/transactions
+Authorization: Bearer {{authProviderA.response.body.$.access_token}}
+Content-Type: application/json
+Idempotency-Key: provider-a:{{runId}}:refund-001
+
+{
+  "providerId": "provider-a",
+  "externalTransactionId": "{{runId}}-refund-001",
+  "playerId": "{{playerId}}",
+  "walletId": "{{createWallet.response.body.$.id}}",
+  "roundId": "{{runId}}-round-001",
+  "gameId": "fortune-chimp",
+  "kind": "REFUND",
+  "money": {
+    "amount": "25.00",
+    "currency": "BRL"
+  },
+  "referenceExternalTransactionId": "{{runId}}-bet-001"
+}
+
+###
+# Second reversal of same BET -> expect 201 REJECTED / ALREADY_REVERSED
+# @name secondReversalRejected
+POST {{api}}/wagering/transactions
+Authorization: Bearer {{authProviderA.response.body.$.access_token}}
+Content-Type: application/json
+Idempotency-Key: provider-a:{{runId}}:rollback-already-reversed
+
+{
+  "providerId": "provider-a",
+  "externalTransactionId": "{{runId}}-rollback-already-reversed",
+  "playerId": "{{playerId}}",
+  "walletId": "{{createWallet.response.body.$.id}}",
+  "roundId": "{{runId}}-round-001",
+  "gameId": "fortune-chimp",
+  "kind": "ROLLBACK",
+  "money": {
+    "amount": "25.00",
+    "currency": "BRL"
+  },
+  "referenceExternalTransactionId": "{{runId}}-bet-001"
+}
+
+###############################################################################
+# OUT-OF-ORDER / PENDING_REFERENCE
+###############################################################################
+
+###
+# REFUND before the referenced BET exists -> expect 201 PENDING_REFERENCE
+# @name pendingRefund
+POST {{api}}/wagering/transactions
+Authorization: Bearer {{authProviderA.response.body.$.access_token}}
+Content-Type: application/json
+Idempotency-Key: provider-a:{{runId}}:pending-refund
+
+{
+  "providerId": "provider-a",
+  "externalTransactionId": "{{runId}}-pending-refund",
+  "playerId": "{{playerId}}",
+  "walletId": "{{createWallet.response.body.$.id}}",
+  "roundId": "{{runId}}-round-pending",
+  "gameId": "fortune-chimp",
+  "kind": "REFUND",
+  "money": {
+    "amount": "12.34",
+    "currency": "BRL"
+  },
+  "referenceExternalTransactionId": "{{runId}}-future-bet"
+}
+
+###
+# Now create the missing BET -> expect 201 PROCESSED
+# @name futureBet
+POST {{api}}/wagering/transactions
+Authorization: Bearer {{authProviderA.response.body.$.access_token}}
+Content-Type: application/json
+Idempotency-Key: provider-a:{{runId}}:future-bet
+
+{
+  "providerId": "provider-a",
+  "externalTransactionId": "{{runId}}-future-bet",
+  "playerId": "{{playerId}}",
+  "walletId": "{{createWallet.response.body.$.id}}",
+  "roundId": "{{runId}}-round-pending",
+  "gameId": "fortune-chimp",
+  "kind": "BET",
+  "money": {
+    "amount": "12.34",
+    "currency": "BRL"
+  }
+}
+
+###
+# Run a few seconds later -> pending refund should eventually become PROCESSED
+# @name getPendingRefundEventually
+GET {{api}}/providers/provider-a/wagering/transactions/{{runId}}-pending-refund
+Authorization: Bearer {{authProviderA.response.body.$.access_token}}
+
+###
+# After resolution wallet should be back to 110.00
+# @name getWalletAfterPendingResolution
+GET {{api}}/wallets/{{createWallet.response.body.$.id}}
+Authorization: Bearer {{authInternal.response.body.$.access_token}}
+
+###############################################################################
+# QUERIES / AUDIT
+###############################################################################
+
+###
+# @name getBetByInternalId
+GET {{api}}/wagering/transactions/{{bet25.response.body.$.transactionId}}
+Authorization: Bearer {{authProviderA.response.body.$.access_token}}
+
+###
+# @name getBetByExternalId
+GET {{api}}/providers/provider-a/wagering/transactions/{{runId}}-bet-001
+Authorization: Bearer {{authProviderA.response.body.$.access_token}}
+
+###
+# @name ledger
+GET {{api}}/wallets/{{createWallet.response.body.$.id}}/ledger?limit=50
+Authorization: Bearer {{authInternal.response.body.$.access_token}}
+
+###
+# Expect consistent=true, difference 0.00
+# @name reconciliation
+POST {{api}}/wallets/{{createWallet.response.body.$.id}}/reconciliation
+Authorization: Bearer {{authInternal.response.body.$.access_token}}
+
+###############################################################################
+# AUTHORIZATION / VALIDATION NEGATIVE CASES
+###############################################################################
+
+###
+# No token -> 401
+GET {{api}}/wallets/{{createWallet.response.body.$.id}}
+
+###
+# Provider token on internal route -> 403
+GET {{api}}/wallets/{{createWallet.response.body.$.id}}
+Authorization: Bearer {{authProviderA.response.body.$.access_token}}
+
+###
+# Internal token on provider route -> 403
+POST {{api}}/wagering/transactions
+Authorization: Bearer {{authInternal.response.body.$.access_token}}
+Content-Type: application/json
+Idempotency-Key: internal-should-not-work
+
+{
+  "providerId": "wagering-internal",
+  "externalTransactionId": "{{runId}}-internal-invalid",
+  "playerId": "{{playerId}}",
+  "walletId": "{{createWallet.response.body.$.id}}",
+  "roundId": "{{runId}}-invalid",
+  "gameId": "fortune-chimp",
+  "kind": "BET",
+  "money": {
+    "amount": "1.00",
+    "currency": "BRL"
+  }
+}
+
+###
+# Provider B token claiming provider A -> 403
+POST {{api}}/wagering/transactions
+Authorization: Bearer {{authProviderB.response.body.$.access_token}}
+Content-Type: application/json
+Idempotency-Key: provider-b:{{runId}}:spoof
+
+{
+  "providerId": "provider-a",
+  "externalTransactionId": "{{runId}}-spoof",
+  "playerId": "{{playerId}}",
+  "walletId": "{{createWallet.response.body.$.id}}",
+  "roundId": "{{runId}}-spoof",
+  "gameId": "fortune-chimp",
+  "kind": "BET",
+  "money": {
+    "amount": "1.00",
+    "currency": "BRL"
+  }
+}
+
+###
+# Provider A querying Provider B namespace -> 403
+GET {{api}}/providers/provider-b/wagering/transactions/anything
+Authorization: Bearer {{authProviderA.response.body.$.access_token}}
+
+###
+# JSON number instead of fixed-decimal string -> 400
+POST {{api}}/wagering/transactions
+Authorization: Bearer {{authProviderA.response.body.$.access_token}}
+Content-Type: application/json
+Idempotency-Key: provider-a:{{runId}}:bad-money-number
+
+{
+  "providerId": "provider-a",
+  "externalTransactionId": "{{runId}}-bad-money-number",
+  "playerId": "{{playerId}}",
+  "walletId": "{{createWallet.response.body.$.id}}",
+  "roundId": "{{runId}}-bad-money",
+  "gameId": "fortune-chimp",
+  "kind": "BET",
+  "money": {
+    "amount": 10.00,
+    "currency": "BRL"
+  }
+}
+
+###
+# LOSS with non-zero amount -> 400
+POST {{api}}/wagering/transactions
+Authorization: Bearer {{authProviderA.response.body.$.access_token}}
+Content-Type: application/json
+Idempotency-Key: provider-a:{{runId}}:bad-loss
+
+{
+  "providerId": "provider-a",
+  "externalTransactionId": "{{runId}}-bad-loss",
+  "playerId": "{{playerId}}",
+  "walletId": "{{createWallet.response.body.$.id}}",
+  "roundId": "{{runId}}-bad-loss",
+  "gameId": "fortune-chimp",
+  "kind": "LOSS",
+  "money": {
+    "amount": "1.00",
+    "currency": "BRL"
+  }
+}
+
+###
+# REFUND without reference -> 400
+POST {{api}}/wagering/transactions
+Authorization: Bearer {{authProviderA.response.body.$.access_token}}
+Content-Type: application/json
+Idempotency-Key: provider-a:{{runId}}:bad-refund
+
+{
+  "providerId": "provider-a",
+  "externalTransactionId": "{{runId}}-bad-refund",
+  "playerId": "{{playerId}}",
+  "walletId": "{{createWallet.response.body.$.id}}",
+  "roundId": "{{runId}}-bad-refund",
+  "gameId": "fortune-chimp",
+  "kind": "REFUND",
+  "money": {
+    "amount": "1.00",
+    "currency": "BRL"
+  }
+}
+
+###
+# Unsupported currency -> 400
+POST {{api}}/wagering/transactions
+Authorization: Bearer {{authProviderA.response.body.$.access_token}}
+Content-Type: application/json
+Idempotency-Key: provider-a:{{runId}}:usd
+
+{
+  "providerId": "provider-a",
+  "externalTransactionId": "{{runId}}-usd",
+  "playerId": "{{playerId}}",
+  "walletId": "{{createWallet.response.body.$.id}}",
+  "roundId": "{{runId}}-usd",
+  "gameId": "fortune-chimp",
+  "kind": "BET",
+  "money": {
+    "amount": "1.00",
+    "currency": "USD"
+  }
+}

@@ -594,3 +594,9 @@ For deeper design details, see [ARCHITECTURE.md](ARCHITECTURE.md), including:
 - messaging security and least-privilege IAM;
 - application lifecycle and graceful shutdown;
 - deliberate trade-offs and remaining limitations.
+
+## Development helpers
+
+Optional end-to-end HTTP scenarios for the VS Code REST Client are available in [`examples/wagering-local.http`](examples/wagering-local.http).
+
+The collection includes authentication, wallet creation, wagering flows, idempotent replay, reversals, pending-reference recovery, authorization and validation checks, ledger inspection, and reconciliation.
