@@ -385,6 +385,8 @@ func registerLifecycle(
 			},
 
 			OnStop: func(ctx context.Context) error {
+				consumerWorker.PrepareShutdown(ctx)
+
 				if cancel != nil {
 					cancel()
 				}

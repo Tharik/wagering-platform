@@ -169,6 +169,128 @@ func TestConsumerMalformedMessageSchedulesRetryWithoutDelete(t *testing.T) {
 	}
 }
 
+func TestConsumerProcessingFailureDuringDrainDoesNotChangeVisibility(t *testing.T) {
+	started := make(chan struct{})
+	release := make(chan struct{})
+	processorErr := errors.New("processing failed during drain")
+	client := &consumerClientFake{messages: []awstypes.Message{validUnitMessage(1)}}
+	processor := &messageProcessorFake{process: func(context.Context) (wagering.MessageProcessResult, error) {
+		close(started)
+		<-release
+		return wagering.MessageProcessResult{}, processorErr
+	}}
+	consumer := newUnitConsumer(client, processor)
+	receiveCtx, cancelReceive := context.WithCancel(context.Background())
+	result := make(chan error, 1)
+
+	go func() {
+		_, err := consumer.ConsumeOnceWithContexts(receiveCtx, context.Background())
+		result <- err
+	}()
+
+	<-started
+	cancelReceive()
+	close(release)
+
+	if err := <-result; !errors.Is(err, processorErr) {
+		t.Fatalf("expected processing error, got %v", err)
+	}
+	if client.deleteCalls != 0 || client.visibilityCalls != 0 {
+		t.Fatalf("expected no transport mutation, got visibility=%d deletes=%d", client.visibilityCalls, client.deleteCalls)
+	}
+}
+
+func TestConsumerSuccessfulProcessingDuringDrainDeletesMessage(t *testing.T) {
+	started := make(chan struct{})
+	release := make(chan struct{})
+	client := &consumerClientFake{messages: []awstypes.Message{validUnitMessage(1)}}
+	processor := &messageProcessorFake{process: func(context.Context) (wagering.MessageProcessResult, error) {
+		close(started)
+		<-release
+		return wagering.MessageProcessResult{}, nil
+	}}
+	consumer := newUnitConsumer(client, processor)
+	receiveCtx, cancelReceive := context.WithCancel(context.Background())
+	result := make(chan error, 1)
+
+	go func() {
+		_, err := consumer.ConsumeOnceWithContexts(receiveCtx, context.Background())
+		result <- err
+	}()
+
+	<-started
+	cancelReceive()
+	close(release)
+
+	if err := <-result; err != nil {
+		t.Fatalf("consume during drain: %v", err)
+	}
+	if client.deleteCalls != 1 || client.visibilityCalls != 0 {
+		t.Fatalf("expected delete without visibility change, got visibility=%d deletes=%d", client.visibilityCalls, client.deleteCalls)
+	}
+}
+
+func TestConsumerDrainCancellationDoesNotDeleteOrChangeVisibility(t *testing.T) {
+	started := make(chan struct{})
+	client := &consumerClientFake{messages: []awstypes.Message{validUnitMessage(1)}}
+	processor := &messageProcessorFake{process: func(ctx context.Context) (wagering.MessageProcessResult, error) {
+		close(started)
+		<-ctx.Done()
+		return wagering.MessageProcessResult{}, ctx.Err()
+	}}
+	consumer := newUnitConsumer(client, processor)
+	receiveCtx, cancelReceive := context.WithCancel(context.Background())
+	processingCtx, cancelProcessing := context.WithCancel(context.Background())
+	result := make(chan error, 1)
+
+	go func() {
+		_, err := consumer.ConsumeOnceWithContexts(receiveCtx, processingCtx)
+		result <- err
+	}()
+
+	<-started
+	cancelReceive()
+	cancelProcessing()
+
+	if err := <-result; !errors.Is(err, context.Canceled) {
+		t.Fatalf("expected processing cancellation, got %v", err)
+	}
+	if client.deleteCalls != 0 || client.visibilityCalls != 0 {
+		t.Fatalf("expected no transport mutation, got visibility=%d deletes=%d", client.visibilityCalls, client.deleteCalls)
+	}
+}
+
+func TestConsumerDoesNotProcessMessageReturnedDuringShutdown(t *testing.T) {
+	receiveCtx := &cancelBeforeProcessingContext{Context: context.Background()}
+	client := &consumerClientFake{messages: []awstypes.Message{validUnitMessage(1)}}
+	processor := &messageProcessorFake{}
+	consumer := newUnitConsumer(client, processor)
+
+	_, err := consumer.ConsumeOnceWithContexts(receiveCtx, context.Background())
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("expected receive cancellation, got %v", err)
+	}
+	if processor.calls != 0 {
+		t.Fatalf("expected processor not to run, got %d calls", processor.calls)
+	}
+	if client.deleteCalls != 0 || client.visibilityCalls != 0 {
+		t.Fatalf("expected no transport mutation, got visibility=%d deletes=%d", client.visibilityCalls, client.deleteCalls)
+	}
+}
+
+type cancelBeforeProcessingContext struct {
+	context.Context
+	errChecks int
+}
+
+func (c *cancelBeforeProcessingContext) Err() error {
+	c.errChecks++
+	if c.errChecks >= 2 {
+		return context.Canceled
+	}
+	return nil
+}
+
 type consumerClientFake struct {
 	messages        []awstypes.Message
 	receiveInput    *awssqs.ReceiveMessageInput
@@ -207,14 +329,20 @@ func (c *consumerClientFake) ChangeMessageVisibility(
 }
 
 type messageProcessorFake struct {
-	result wagering.MessageProcessResult
-	err    error
+	result  wagering.MessageProcessResult
+	err     error
+	process func(context.Context) (wagering.MessageProcessResult, error)
+	calls   int
 }
 
 func (p *messageProcessorFake) Process(
-	_ context.Context,
+	ctx context.Context,
 	_ wagering.MessageProcessCommand,
 ) (wagering.MessageProcessResult, error) {
+	p.calls++
+	if p.process != nil {
+		return p.process(ctx)
+	}
 	return p.result, p.err
 }
 

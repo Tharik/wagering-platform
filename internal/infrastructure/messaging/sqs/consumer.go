@@ -202,10 +202,17 @@ func NewConsumerWithMetricsAndLogger(
 }
 
 func (c *Consumer) ConsumeOnce(ctx context.Context) (int, error) {
+	return c.ConsumeOnceWithContexts(ctx, ctx)
+}
+
+func (c *Consumer) ConsumeOnceWithContexts(
+	receiveCtx context.Context,
+	processingCtx context.Context,
+) (int, error) {
 
 	output, err := c.client.ReceiveMessage(
 
-		ctx,
+		receiveCtx,
 
 		&awssqs.ReceiveMessageInput{
 
@@ -233,15 +240,22 @@ func (c *Consumer) ConsumeOnce(ctx context.Context) (int, error) {
 
 	}
 
+	if err := receiveCtx.Err(); err != nil {
+		return 0, err
+	}
+
 	processed := 0
 
 	for _, message := range output.Messages {
 
 		c.recordRetry(message)
+		if err := receiveCtx.Err(); err != nil {
+			return processed, err
+		}
 
-		if err := c.processMessage(ctx, message); err != nil {
-			if ctx.Err() == nil {
-				c.scheduleRetry(ctx, message, err)
+		if err := c.processMessage(processingCtx, message); err != nil {
+			if receiveCtx.Err() == nil && processingCtx.Err() == nil {
+				c.scheduleRetry(processingCtx, message, err)
 			}
 
 			return processed, err
