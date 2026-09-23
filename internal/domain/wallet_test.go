@@ -2,6 +2,7 @@ package domain
 
 import (
 	"errors"
+	"math"
 	"testing"
 	"time"
 )
@@ -97,6 +98,43 @@ func TestWalletCredit(t *testing.T) {
 			"expected version 2, got %d",
 			wallet.Version,
 		)
+	}
+}
+
+func TestWalletCreditReachesMaximumBalance(t *testing.T) {
+	now := time.Now()
+	wallet := NewWallet("wallet-1", "player-1", NewMoney(math.MaxInt64-1, BRL), now)
+
+	if err := wallet.Credit(NewMoney(1, BRL), now); err != nil {
+		t.Fatal(err)
+	}
+	if wallet.Balance.Amount() != math.MaxInt64 || wallet.Version != 2 {
+		t.Fatalf("expected maximum balance/version 2, got %d/%d", wallet.Balance.Amount(), wallet.Version)
+	}
+}
+
+func TestWalletCreditOverflowDoesNotMutate(t *testing.T) {
+	now := time.Now()
+	wallet := NewWallet("wallet-1", "player-1", NewMoney(math.MaxInt64, BRL), now)
+
+	err := wallet.Credit(NewMoney(1, BRL), now)
+	if !errors.Is(err, ErrMoneyOverflow) {
+		t.Fatalf("expected money overflow, got %v", err)
+	}
+	if wallet.Balance.Amount() != math.MaxInt64 || wallet.Version != 1 {
+		t.Fatalf("wallet mutated after overflow: balance=%d version=%d", wallet.Balance.Amount(), wallet.Version)
+	}
+}
+
+func TestWalletDebitExactBalanceCannotUnderflow(t *testing.T) {
+	now := time.Now()
+	wallet := NewWallet("wallet-1", "player-1", NewMoney(math.MaxInt64, BRL), now)
+
+	if err := wallet.Debit(NewMoney(math.MaxInt64, BRL), now); err != nil {
+		t.Fatal(err)
+	}
+	if wallet.Balance.Amount() != 0 || wallet.Version != 2 {
+		t.Fatalf("expected zero balance/version 2, got %d/%d", wallet.Balance.Amount(), wallet.Version)
 	}
 }
 

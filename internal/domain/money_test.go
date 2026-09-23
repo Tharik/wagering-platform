@@ -2,6 +2,8 @@ package domain
 
 import (
 	"errors"
+	"math"
+	"strings"
 	"testing"
 )
 
@@ -11,11 +13,10 @@ func TestParseMoney(t *testing.T) {
 		input    string
 		expected int64
 	}{
-		{"whole amount", "25", 2500},
-		{"one decimal", "25.5", 2550},
-		{"two decimals", "25.50", 2550},
 		{"zero", "0.00", 0},
 		{"one cent", "0.01", 1},
+		{"normal amount", "25.50", 2550},
+		{"maximum", "92233720368547758.07", math.MaxInt64},
 	}
 
 	for _, tt := range tests {
@@ -37,26 +38,40 @@ func TestParseMoney(t *testing.T) {
 }
 
 func TestParseMoneyRejectsInvalidValues(t *testing.T) {
-	values := []string{
-		"",
-		"-1.00",
-		"1.001",
-		"1e3",
-		"NaN",
-		"Infinity",
-		".50",
-		"1.",
-		"abc",
+	tests := []struct {
+		name  string
+		value string
+		err   error
+	}{
+		{"empty", "", ErrInvalidMoneyFormat},
+		{"missing decimal", "1", ErrInvalidMoneyFormat},
+		{"one decimal", "1.2", ErrInvalidMoneyFormat},
+		{"extra decimal", "1.234", ErrInvalidMoneyFormat},
+		{"missing whole", ".50", ErrInvalidMoneyFormat},
+		{"missing fraction", "1.", ErrInvalidMoneyFormat},
+		{"leading plus", "+1.00", ErrInvalidMoneyFormat},
+		{"negative", "-1.00", ErrInvalidMoneyFormat},
+		{"leading whitespace", " 1.00", ErrInvalidMoneyFormat},
+		{"trailing whitespace", "1.00 ", ErrInvalidMoneyFormat},
+		{"lower scientific", "1e2", ErrInvalidMoneyFormat},
+		{"upper scientific", "1E2", ErrInvalidMoneyFormat},
+		{"not a number", "NaN", ErrInvalidMoneyFormat},
+		{"infinity", "Infinity", ErrInvalidMoneyFormat},
+		{"max plus one cent", "92233720368547758.08", ErrMoneyOverflow},
+		{"next whole amount", "92233720368547759.00", ErrMoneyOverflow},
+		{"huge amount", "999999999999999999999999999999999999.99", ErrMoneyOverflow},
+		{"thousand digits", strings.Repeat("9", 1000) + ".99", ErrMoneyOverflow},
 	}
 
-	for _, value := range values {
-		t.Run(value, func(t *testing.T) {
-			_, err := ParseMoney(value, BRL)
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, err := ParseMoney(tt.value, BRL)
 
-			if !errors.Is(err, ErrInvalidMoneyFormat) {
+			if !errors.Is(err, tt.err) {
 				t.Fatalf(
-					"expected ErrInvalidMoneyFormat for %q, got %v",
-					value,
+					"expected %v for %q, got %v",
+					tt.err,
+					tt.value,
 					err,
 				)
 			}
@@ -64,17 +79,31 @@ func TestParseMoneyRejectsInvalidValues(t *testing.T) {
 	}
 }
 
-func TestMoneyAdd(t *testing.T) {
-	a := NewMoney(1000, BRL)
-	b := NewMoney(500, BRL)
-
-	result, err := a.Add(b)
-	if err != nil {
-		t.Fatal(err)
+func TestMoneyAddBoundaries(t *testing.T) {
+	tests := []struct {
+		name     string
+		left     int64
+		right    int64
+		expected int64
+		err      error
+	}{
+		{"safe positive", 1000, 500, 1500, nil},
+		{"exact maximum", math.MaxInt64 - 1, 1, math.MaxInt64, nil},
+		{"positive overflow", math.MaxInt64, 1, 0, ErrMoneyOverflow},
+		{"safe negative", -100, -50, -150, nil},
+		{"negative underflow", math.MinInt64, -1, 0, ErrMoneyOverflow},
 	}
 
-	if result.Amount() != 1500 {
-		t.Fatalf("expected 1500, got %d", result.Amount())
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result, err := NewMoney(tt.left, BRL).Add(NewMoney(tt.right, BRL))
+			if !errors.Is(err, tt.err) {
+				t.Fatalf("expected error %v, got %v", tt.err, err)
+			}
+			if err == nil && result.Amount() != tt.expected {
+				t.Fatalf("expected %d, got %d", tt.expected, result.Amount())
+			}
+		})
 	}
 }
 
@@ -87,19 +116,38 @@ func TestMoneyRejectsCurrencyMismatch(t *testing.T) {
 	if !errors.Is(err, ErrCurrencyMismatch) {
 		t.Fatalf("expected currency mismatch, got %v", err)
 	}
+
+	_, err = brl.Subtract(usd)
+	if !errors.Is(err, ErrCurrencyMismatch) {
+		t.Fatalf("expected subtraction currency mismatch, got %v", err)
+	}
 }
 
-func TestMoneySubtract(t *testing.T) {
-	a := NewMoney(1000, BRL)
-	b := NewMoney(250, BRL)
-
-	result, err := a.Subtract(b)
-	if err != nil {
-		t.Fatal(err)
+func TestMoneySubtractBoundaries(t *testing.T) {
+	tests := []struct {
+		name     string
+		left     int64
+		right    int64
+		expected int64
+		err      error
+	}{
+		{"safe subtraction", 1000, 250, 750, nil},
+		{"exact maximum", math.MaxInt64 - 1, -1, math.MaxInt64, nil},
+		{"positive overflow", math.MaxInt64, -1, 0, ErrMoneyOverflow},
+		{"negative underflow", math.MinInt64, 1, 0, ErrMoneyOverflow},
+		{"subtract minimum", 0, math.MinInt64, 0, ErrMoneyOverflow},
 	}
 
-	if result.Amount() != 750 {
-		t.Fatalf("expected 750, got %d", result.Amount())
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result, err := NewMoney(tt.left, BRL).Subtract(NewMoney(tt.right, BRL))
+			if !errors.Is(err, tt.err) {
+				t.Fatalf("expected error %v, got %v", tt.err, err)
+			}
+			if err == nil && result.Amount() != tt.expected {
+				t.Fatalf("expected %d, got %d", tt.expected, result.Amount())
+			}
+		})
 	}
 }
 
@@ -123,13 +171,14 @@ func TestMoneyString(t *testing.T) {
 		amount   int64
 		expected string
 	}{
-		{"positive amount", 1234, "12.34"},
-		{"positive cents", 50, "0.50"},
 		{"zero", 0, "0.00"},
-		{"negative amount", -1234, "-12.34"},
-		{"negative cents", -50, "-0.50"},
+		{"one cent", 1, "0.01"},
+		{"one unit", 100, "1.00"},
+		{"representative", 1234, "12.34"},
+		{"maximum int64", math.MaxInt64, "92233720368547758.07"},
 		{"negative one cent", -1, "-0.01"},
-		{"minimum int64", -9223372036854775808, "-92233720368547758.08"},
+		{"negative one unit", -100, "-1.00"},
+		{"minimum int64", math.MinInt64, "-92233720368547758.08"},
 	}
 
 	for _, tt := range tests {

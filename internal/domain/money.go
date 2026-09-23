@@ -33,36 +33,15 @@ func NewMoney(amount int64, currency Currency) Money {
 }
 
 func ParseMoney(value string, currency Currency) (Money, error) {
-	if value == "" || strings.ContainsAny(value, "eE") {
-		return Money{}, ErrInvalidMoneyFormat
-	}
-
-	// External monetary amounts cannot be negative.
-	if strings.HasPrefix(value, "-") {
-		return Money{}, ErrInvalidMoneyFormat
-	}
-
 	parts := strings.Split(value, ".")
-	if len(parts) > 2 {
+	if len(parts) != 2 {
 		return Money{}, ErrInvalidMoneyFormat
 	}
 
 	whole := parts[0]
-	if whole == "" {
+	fraction := parts[1]
+	if whole == "" || len(fraction) != 2 {
 		return Money{}, ErrInvalidMoneyFormat
-	}
-
-	fraction := "00"
-
-	if len(parts) == 2 {
-		switch len(parts[1]) {
-		case 1:
-			fraction = parts[1] + "0"
-		case 2:
-			fraction = parts[1]
-		default:
-			return Money{}, ErrInvalidMoneyFormat
-		}
 	}
 
 	if !allDigits(whole) || !allDigits(fraction) {

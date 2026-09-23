@@ -1,6 +1,9 @@
 package domain
 
-import "testing"
+import (
+	"errors"
+	"testing"
+)
 
 func TestPayloadHashIsDeterministic(t *testing.T) {
 	request := WagerRequest{
@@ -63,18 +66,13 @@ func TestPayloadHashChangesWhenBusinessPayloadChanges(t *testing.T) {
 	}
 }
 
-func TestEquivalentMoneyProducesSamePayloadHash(t *testing.T) {
-	firstAmount, err := ParseMoney("25.0", BRL)
+func TestFixedDecimalMoneyProducesCanonicalPayloadHash(t *testing.T) {
+	amount, err := ParseMoney("25.00", BRL)
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	secondAmount, err := ParseMoney("25.00", BRL)
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	first := WagerRequest{
+	request := WagerRequest{
 		ProviderID:            "provider-a",
 		ExternalTransactionID: "bet-123",
 		PlayerID:              "player-1",
@@ -82,24 +80,27 @@ func TestEquivalentMoneyProducesSamePayloadHash(t *testing.T) {
 		RoundID:               "round-1",
 		GameID:                "game-1",
 		Kind:                  WagerKindBet,
-		Amount:                firstAmount,
+		Amount:                amount,
 	}
 
-	second := first
-	second.Amount = secondAmount
-
-	firstHash, err := first.PayloadHash()
+	firstHash, err := request.PayloadHash()
 	if err != nil {
 		t.Fatal(err)
 	}
-
-	secondHash, err := second.PayloadHash()
+	secondHash, err := request.PayloadHash()
 	if err != nil {
 		t.Fatal(err)
 	}
 
 	if firstHash != secondHash {
-		t.Fatal("equivalent monetary values must produce the same hash")
+		t.Fatal("fixed-decimal money must produce a deterministic hash")
+	}
+}
+
+func TestInvalidMoneyCannotBecomeCanonicalPayload(t *testing.T) {
+	_, err := ParseMoney("25.0", BRL)
+	if !errors.Is(err, ErrInvalidMoneyFormat) {
+		t.Fatalf("expected invalid money format before hashing, got %v", err)
 	}
 }
 
