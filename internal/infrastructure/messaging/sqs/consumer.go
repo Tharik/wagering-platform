@@ -33,6 +33,7 @@ const (
 	consumerMaxMessages           = int32(1)
 	consumerWaitTimeSeconds       = int32(10)
 	maxRetryVisibilitySeconds     = int32(60)
+	shutdownVisibilityTimeout     = 2 * time.Second
 )
 
 type ConsumerClient interface {
@@ -241,6 +242,9 @@ func (c *Consumer) ConsumeOnceWithContexts(
 	}
 
 	if err := receiveCtx.Err(); err != nil {
+		for _, message := range output.Messages {
+			c.releaseForShutdown(message)
+		}
 		return 0, err
 	}
 
@@ -250,11 +254,19 @@ func (c *Consumer) ConsumeOnceWithContexts(
 
 		c.recordRetry(message)
 		if err := receiveCtx.Err(); err != nil {
+			c.releaseForShutdown(message)
 			return processed, err
 		}
 
-		if err := c.processMessage(processingCtx, message); err != nil {
-			if receiveCtx.Err() == nil && processingCtx.Err() == nil {
+		processorSucceeded, err := c.processMessage(processingCtx, message)
+		if err != nil {
+			if processorSucceeded {
+				if receiveCtx.Err() == nil && processingCtx.Err() == nil {
+					c.scheduleRetry(processingCtx, message, err)
+				}
+			} else if receiveCtx.Err() != nil {
+				c.releaseForShutdown(message)
+			} else if processingCtx.Err() == nil {
 				c.scheduleRetry(processingCtx, message, err)
 			}
 
@@ -268,6 +280,46 @@ func (c *Consumer) ConsumeOnceWithContexts(
 
 	return processed, nil
 
+}
+
+func (c *Consumer) releaseForShutdown(message awstypes.Message) {
+	messageID := messageIdentifier(message)
+
+	if message.ReceiptHandle == nil {
+		c.logger.Warn(
+			"cannot release SQS command during shutdown without receipt handle",
+			slog.String("messageId", messageID),
+		)
+		return
+	}
+
+	ctx, cancel := context.WithTimeout(
+		context.Background(),
+		shutdownVisibilityTimeout,
+	)
+	defer cancel()
+
+	_, err := c.client.ChangeMessageVisibility(
+		ctx,
+		&awssqs.ChangeMessageVisibilityInput{
+			QueueUrl:          aws.String(c.queueURL),
+			ReceiptHandle:     message.ReceiptHandle,
+			VisibilityTimeout: 0,
+		},
+	)
+	if err != nil {
+		c.logger.Warn(
+			"failed to release SQS command during shutdown",
+			slog.String("messageId", messageID),
+			slog.Any("error", err),
+		)
+		return
+	}
+
+	c.logger.Debug(
+		"released SQS command during shutdown",
+		slog.String("messageId", messageID),
+	)
 }
 
 func (c *Consumer) scheduleRetry(
@@ -377,17 +429,17 @@ func (c *Consumer) processMessage(
 
 	message awstypes.Message,
 
-) error {
+) (bool, error) {
 
 	if message.Body == nil {
 
-		return errors.New("SQS message body is required")
+		return false, errors.New("SQS message body is required")
 
 	}
 
 	if message.ReceiptHandle == nil {
 
-		return errors.New("SQS receipt handle is required")
+		return false, errors.New("SQS receipt handle is required")
 
 	}
 
@@ -397,7 +449,7 @@ func (c *Consumer) processMessage(
 
 	if err != nil {
 
-		return fmt.Errorf(
+		return false, fmt.Errorf(
 
 			"decode SQS command: %w",
 
@@ -452,7 +504,7 @@ func (c *Consumer) processMessage(
 
 	if err != nil {
 
-		return fmt.Errorf(
+		return false, fmt.Errorf(
 
 			"process SQS command %s: %w",
 
@@ -502,7 +554,7 @@ func (c *Consumer) processMessage(
 
 	if err != nil {
 
-		return fmt.Errorf(
+		return true, fmt.Errorf(
 
 			"delete SQS command %s: %w",
 
@@ -513,7 +565,7 @@ func (c *Consumer) processMessage(
 
 	}
 
-	return nil
+	return true, nil
 
 }
 

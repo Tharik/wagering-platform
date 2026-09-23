@@ -33,7 +33,9 @@ func TestConsumerWorkerShutdownInterruptsReceivePromptly(t *testing.T) {
 func TestConsumerWorkerDrainsSuccessfulInFlightProcessing(t *testing.T) {
 	processingStarted := make(chan struct{})
 	releaseProcessing := make(chan struct{})
+	consumeCalls := 0
 	consumer := &drainConsumerFake{consume: func(_, _ context.Context) (int, error) {
+		consumeCalls++
 		close(processingStarted)
 		<-releaseProcessing
 		return 1, nil
@@ -56,6 +58,10 @@ func TestConsumerWorkerDrainsSuccessfulInFlightProcessing(t *testing.T) {
 
 	close(releaseProcessing)
 	awaitWorkerExit(t, done)
+
+	if consumeCalls != 1 {
+		t.Fatalf("expected no new receive after shutdown, got %d consume calls", consumeCalls)
+	}
 }
 
 func TestConsumerWorkerCancelsProcessingAtDrainTimeout(t *testing.T) {
