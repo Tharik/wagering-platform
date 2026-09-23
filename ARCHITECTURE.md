@@ -131,7 +131,7 @@ SQS processing extends this boundary by also including Inbox state in the same t
 
 ---
 
-## 6. Persistent idempotency
+## 6. Canonical wagering idempotency
 
 Idempotency is persisted in PostgreSQL and therefore works across:
 
@@ -141,15 +141,64 @@ Idempotency is persisted in PostgreSQL and therefore works across:
 - SQS redeliveries;
 - HTTP/SQS cross-channel retries.
 
-Before persistence, the logical request is normalized and converted into a canonical hash.
+The wager hash is produced by deterministic JSON serialization of a concrete Go struct. This is not a generic canonical-JSON scheme. The struct fields are declared and serialized in this order:
 
-The persisted idempotency information associates the request identity with its canonical payload and original result.
+1. `providerId`
+2. `externalTransactionId`
+3. `playerId`
+4. `walletId`
+5. `roundId`
+6. `gameId`
+7. `kind`
+8. `amount`
+9. `currency`
+10. `referenceExternalTransactionId`, only when non-empty
 
-If the same operation is received again with the same canonical payload, the original result is returned without producing another financial movement.
+For example, a BET without a reference serializes to compact JSON with the following logical content and field order:
 
-If an idempotency identity is reused with a different payload, the request is rejected rather than silently treating two different operations as equivalent.
+```json
+{
+  "providerId": "provider-a",
+  "externalTransactionId": "ext-123",
+  "playerId": "player-1",
+  "walletId": "wallet-1",
+  "roundId": "round-1",
+  "gameId": "game-1",
+  "kind": "BET",
+  "amount": "25.00",
+  "currency": "BRL"
+}
+```
 
-Database uniqueness constraints provide an additional race-safe boundary for concurrent requests attempting to create the same logical transaction.
+The implementation uses `encoding/json`, SHA-256, and lowercase hexadecimal encoding. The resulting 64-character value is stored in `wager_transactions.payload_hash`, a `CHAR(64)` column. The hash provides deterministic request identity comparison; it is not password hashing. Cryptographic collision risk is accepted as negligible, while the selected canonical fields define the business identity.
+
+External money is parsed before the domain request is built. The canonical amount is the fixed two-decimal result of `Money.String()`, and currency comes from `Money.Currency()`. Invalid external money formats fail before a persisted wager identity or hash is established.
+
+`referenceExternalTransactionId` uses `omitempty`. A missing reference and an explicitly empty reference both become an empty Go string and are omitted, so they hash identically. A non-empty reference is serialized as the final field and changes the hash.
+
+The wager hash excludes the `Idempotency-Key` itself, transaction ID, state, result balance, failure code, timestamps, correlation ID, causation ID, HTTP headers, authentication token, SQS message ID, receipt metadata, and raw transport JSON.
+
+The persisted idempotency identity is:
+
+```text
+(providerId, idempotencyKey)
+```
+
+The key selects the idempotency record but is not part of the canonical payload hash. `providerId` is both part of the hash and part of the database identity. No existing record allows processing to continue. The same provider/key and hash replays the original transaction ID, state, result balance, and failure code, with `idempotentReplay: true`; a different hash returns `ErrIdempotencyConflict`. HTTP returns `201` for first accepted processing and `200` for replay.
+
+Provider external transaction identity is an independent database constraint:
+
+```text
+(providerId, externalTransactionId)
+```
+
+Using another idempotency key does not permit reuse of that identity. A different key with the same provider/external transaction returns `ErrExternalTransactionExists`. HTTP maps both conflict classes to `409 Conflict`.
+
+HTTP and SQS parse their transport inputs into the same `domain.WagerRequest` and call the same wagering application service, so they use the same canonical wager hash. HTTP obtains the authoritative provider from the authenticated principal after matching it against the body; SQS preserves its existing trusted-message provider model.
+
+SQS also has a separate Inbox identity based on `(consumerName, messageId)`. The Inbox hashes the exact raw message body to detect reuse of a message ID with different transport content. That transport-level hash is distinct from wagering idempotency: a textual SQS-body change can conflict at the Inbox boundary even when its logical wager fields would produce the same canonical wager hash.
+
+Database uniqueness constraints provide the race-safe boundary for concurrent requests attempting to create the same idempotency or external transaction identity.
 
 Idempotency is therefore not dependent on a local cache or mutex.
 
