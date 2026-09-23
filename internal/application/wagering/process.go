@@ -19,7 +19,7 @@ var (
 	ErrExternalTransactionExists = errors.New("external transaction already exists")
 	ErrWalletNotFound            = errors.New("wallet not found")
 	ErrWalletPlayerMismatch      = errors.New("wallet does not belong to player")
-	ErrInvalidLossAmount         = errors.New("LOSS amount must be zero")
+	ErrInvalidLossAmount         = domain.ErrInvalidLossAmount
 )
 
 type ProcessCommand struct {
@@ -112,38 +112,16 @@ func (s *Service) ProcessTx(
 	tx pgx.Tx,
 	cmd ProcessCommand,
 ) (ProcessResult, error) {
+	if err := cmd.Request.ValidateExternal(); err != nil {
+		return ProcessResult{}, err
+	}
+
 	if cmd.IdempotencyKey == "" {
 		return ProcessResult{}, errors.New("idempotency key is required")
 	}
 
 	if cmd.CorrelationID == "" {
 		cmd.CorrelationID = uuid.NewString()
-	}
-
-	if !cmd.Request.Kind.IsValidExternalKind() {
-		return ProcessResult{}, domain.ErrInvalidWagerKind
-	}
-
-	switch cmd.Request.Kind {
-	case domain.WagerKindBet,
-		domain.WagerKindWin,
-		domain.WagerKindLoss,
-		domain.WagerKindRefund,
-		domain.WagerKindRollback:
-		// Supported below.
-
-	default:
-		return ProcessResult{}, domain.ErrInvalidWagerKind
-	}
-
-	if cmd.Request.Kind == domain.WagerKindLoss &&
-		!cmd.Request.Amount.IsZero() {
-		return ProcessResult{}, ErrInvalidLossAmount
-	}
-
-	if cmd.Request.Kind != domain.WagerKindLoss &&
-		cmd.Request.Amount.Amount() <= 0 {
-		return ProcessResult{}, domain.ErrInvalidAmount
 	}
 
 	payloadHash, err := cmd.Request.PayloadHash()

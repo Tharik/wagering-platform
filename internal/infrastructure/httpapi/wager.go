@@ -444,9 +444,11 @@ func writeWagerError(
 			},
 		)
 
-	case errors.Is(err, wagering.ErrInvalidLossAmount),
-		errors.Is(err, domain.ErrInvalidWagerKind),
+	case errors.Is(err, domain.ErrInvalidWagerKind),
 		errors.Is(err, domain.ErrInvalidAmount),
+		errors.Is(err, domain.ErrInvalidLossAmount),
+		errors.Is(err, domain.ErrWagerReferenceRequired),
+		errors.Is(err, domain.ErrWagerReferenceNotAllowed),
 		errors.Is(err, domain.ErrCurrencyMismatch):
 
 		writeJSON(

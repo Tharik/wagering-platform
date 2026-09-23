@@ -303,6 +303,141 @@ func TestConsumerProcessesBetFromSQSAndDeletesMessage(t *testing.T) {
 	}
 }
 
+func TestConsumerDomainValidationFailureRollsBackAndSchedulesRetry(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+
+	pool, err := pgxpool.New(
+		ctx,
+		"postgres://wagering:wagering@localhost:5432/wagering?sslmode=disable",
+	)
+	if err != nil {
+		t.Fatalf("connect postgres: %v", err)
+	}
+	defer pool.Close()
+
+	cleanConsumerDatabase(t, ctx, pool)
+
+	realClient := newTestSQSClient()
+	commandsQueueURL := createIsolatedCommandsQueue(t, ctx, realClient)
+	client := &recordingReceiveClient{Client: realClient}
+
+	walletService := wallet.NewService(pool)
+	createdWallet, err := walletService.Create(
+		ctx,
+		wallet.CreateWalletCommand{
+			PlayerID:       "player-sqs-invalid-domain",
+			InitialBalance: domain.NewMoney(10000, domain.BRL),
+		},
+	)
+	if err != nil {
+		t.Fatalf("create wallet: %v", err)
+	}
+
+	service := wagering.NewService(pool)
+	consumer := NewConsumer(
+		client,
+		wagering.NewMessageProcessor(pool, service),
+		commandsQueueURL,
+	)
+
+	command := CommandMessage{
+		MessageID:  "sqs-invalid-domain-" + uuid.NewString(),
+		Type:       wagerTransactionRequestedType,
+		OccurredAt: time.Now().UTC().Format(time.RFC3339),
+		Data: WagerCommandData{
+			IdempotencyKey:        "sqs-invalid-domain-idempotency-" + uuid.NewString(),
+			ProviderID:            "provider-a",
+			ExternalTransactionID: "sqs-invalid-domain-tx-" + uuid.NewString(),
+			PlayerID:              "player-sqs-invalid-domain",
+			WalletID:              createdWallet.WalletID,
+			RoundID:               "round-sqs-invalid-domain",
+			GameID:                "game-1",
+			Kind:                  "REFUND",
+			Money: MoneyDTO{
+				Amount:   "10.00",
+				Currency: "BRL",
+			},
+			// The message is transport-valid but violates the shared domain rule.
+		},
+	}
+
+	payload, err := json.Marshal(command)
+	if err != nil {
+		t.Fatalf("marshal command: %v", err)
+	}
+	_, err = realClient.SendMessage(
+		ctx,
+		&awssqs.SendMessageInput{
+			QueueUrl:               aws.String(commandsQueueURL),
+			MessageBody:            aws.String(string(payload)),
+			MessageGroupId:         aws.String(createdWallet.WalletID),
+			MessageDeduplicationId: aws.String(command.MessageID),
+		},
+	)
+	if err != nil {
+		t.Fatalf("send command: %v", err)
+	}
+
+	processed, err := consumer.ConsumeOnce(ctx)
+	if !errors.Is(err, domain.ErrWagerReferenceRequired) {
+		t.Fatalf("expected ErrWagerReferenceRequired, got %v", err)
+	}
+	if processed != 0 {
+		t.Fatalf("expected zero processed messages, got %d", processed)
+	}
+	if client.deleteAttempts != 0 {
+		t.Fatalf("expected no DeleteMessage call, got %d", client.deleteAttempts)
+	}
+	if client.visibilityChanges != 1 {
+		t.Fatalf("expected one retry visibility change, got %d", client.visibilityChanges)
+	}
+
+	var balance int64
+	var version int64
+	if err := pool.QueryRow(ctx, `SELECT balance, version FROM wallets WHERE id = $1`, createdWallet.WalletID).Scan(&balance, &version); err != nil {
+		t.Fatalf("query wallet: %v", err)
+	}
+	if balance != 10000 || version != 1 {
+		t.Fatalf("wallet changed after invalid command: balance=%d version=%d", balance, version)
+	}
+
+	assertCount := func(name string, query string, args ...any) {
+		t.Helper()
+		var count int
+		if err := pool.QueryRow(ctx, query, args...).Scan(&count); err != nil {
+			t.Fatalf("count %s: %v", name, err)
+		}
+		if count != 0 {
+			t.Fatalf("expected no %s, got %d", name, count)
+		}
+	}
+
+	assertCount(
+		"wager transaction",
+		`SELECT COUNT(*) FROM wager_transactions WHERE provider_id = $1 AND external_transaction_id = $2`,
+		command.Data.ProviderID,
+		command.Data.ExternalTransactionID,
+	)
+	assertCount(
+		"ledger entry",
+		`SELECT COUNT(*) FROM ledger_entries le JOIN wager_transactions wt ON wt.id = le.transaction_id WHERE wt.provider_id = $1 AND wt.external_transaction_id = $2`,
+		command.Data.ProviderID,
+		command.Data.ExternalTransactionID,
+	)
+	assertCount(
+		"wager outbox event",
+		`SELECT COUNT(*) FROM outbox_events WHERE payload->>'correlationId' = $1`,
+		command.MessageID,
+	)
+	assertCount(
+		"durable inbox registration",
+		`SELECT COUNT(*) FROM inbox_messages WHERE consumer_name = $1 AND message_id = $2`,
+		defaultConsumerName,
+		command.MessageID,
+	)
+}
+
 func TestConsumerCommitsAndDeletesDurablyRejectedReference(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
@@ -595,6 +730,8 @@ type failFirstDeleteClient struct {
 type recordingReceiveClient struct {
 	*awssqs.Client
 	lastReceivedMessage *awstypes.Message
+	deleteAttempts      int
+	visibilityChanges   int
 }
 
 func (c *recordingReceiveClient) ReceiveMessage(
@@ -615,6 +752,22 @@ func (c *recordingReceiveClient) ReceiveMessage(
 		c.lastReceivedMessage = &message
 	}
 	return output, nil
+}
+func (c *recordingReceiveClient) DeleteMessage(
+	ctx context.Context,
+	input *awssqs.DeleteMessageInput,
+	optFns ...func(*awssqs.Options),
+) (*awssqs.DeleteMessageOutput, error) {
+	c.deleteAttempts++
+	return c.Client.DeleteMessage(ctx, input, optFns...)
+}
+func (c *recordingReceiveClient) ChangeMessageVisibility(
+	ctx context.Context,
+	input *awssqs.ChangeMessageVisibilityInput,
+	optFns ...func(*awssqs.Options),
+) (*awssqs.ChangeMessageVisibilityOutput, error) {
+	c.visibilityChanges++
+	return c.Client.ChangeMessageVisibility(ctx, input, optFns...)
 }
 func (c *failFirstDeleteClient) ReceiveMessage(
 	ctx context.Context,

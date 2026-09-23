@@ -33,7 +33,10 @@ const (
 )
 
 var (
-	ErrInvalidWagerKind = errors.New("invalid wager kind")
+	ErrInvalidWagerKind         = errors.New("invalid wager kind")
+	ErrInvalidLossAmount        = errors.New("LOSS amount must be zero")
+	ErrWagerReferenceRequired   = errors.New("reference external transaction ID is required")
+	ErrWagerReferenceNotAllowed = errors.New("reference external transaction ID is not allowed")
 )
 
 type WagerRequest struct {
@@ -46,6 +49,36 @@ type WagerRequest struct {
 	Kind                           WagerKind
 	Amount                         Money
 	ReferenceExternalTransactionID string
+}
+
+func (r WagerRequest) ValidateExternal() error {
+	if !r.Kind.IsValidExternalKind() {
+		return ErrInvalidWagerKind
+	}
+
+	if r.Kind == WagerKindLoss {
+		if !r.Amount.IsZero() {
+			return ErrInvalidLossAmount
+		}
+	} else if r.Amount.Amount() <= 0 {
+		return ErrInvalidAmount
+	}
+
+	hasReference := r.ReferenceExternalTransactionID != ""
+
+	switch r.Kind {
+	case WagerKindBet, WagerKindLoss:
+		if hasReference {
+			return ErrWagerReferenceNotAllowed
+		}
+
+	case WagerKindRefund, WagerKindRollback:
+		if !hasReference {
+			return ErrWagerReferenceRequired
+		}
+	}
+
+	return nil
 }
 
 // CanonicalPayload contains only business fields.

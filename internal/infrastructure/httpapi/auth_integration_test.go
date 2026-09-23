@@ -513,6 +513,99 @@ func TestOIDCAuthenticationAndProviderIsolation(t *testing.T) {
 		}
 	})
 
+	invalidWagerCases := []struct {
+		name      string
+		kind      string
+		amount    string
+		reference string
+	}{
+		{name: "REFUND without reference", kind: "REFUND", amount: "10.00"},
+		{name: "ROLLBACK without reference", kind: "ROLLBACK", amount: "10.00"},
+		{name: "BET with reference", kind: "BET", amount: "10.00", reference: "original-bet"},
+		{name: "LOSS with reference", kind: "LOSS", amount: "0.00", reference: "original-bet"},
+	}
+
+	for index, tt := range invalidWagerCases {
+		t.Run(tt.name+" returns bad request without side effects", func(t *testing.T) {
+			var balanceBefore int64
+			var versionBefore int64
+			if err := pool.QueryRow(ctx, `SELECT balance, version FROM wallets WHERE id = $1`, walletID).Scan(&balanceBefore, &versionBefore); err != nil {
+				t.Fatalf("query wallet before invalid wager: %v", err)
+			}
+
+			var wagersBefore int
+			var ledgerBefore int
+			var outboxBefore int
+			if err := pool.QueryRow(ctx, `SELECT COUNT(*) FROM wager_transactions`).Scan(&wagersBefore); err != nil {
+				t.Fatalf("count wagers before invalid request: %v", err)
+			}
+			if err := pool.QueryRow(ctx, `SELECT COUNT(*) FROM ledger_entries`).Scan(&ledgerBefore); err != nil {
+				t.Fatalf("count ledger before invalid request: %v", err)
+			}
+			if err := pool.QueryRow(ctx, `SELECT COUNT(*) FROM outbox_events`).Scan(&outboxBefore); err != nil {
+				t.Fatalf("count outbox before invalid request: %v", err)
+			}
+
+			externalID := "invalid-contract-" + string(rune('a'+index))
+			body := wagerBody(externalID, walletID)
+			body["kind"] = tt.kind
+			body["money"] = map[string]any{"amount": tt.amount, "currency": "BRL"}
+			if tt.reference != "" {
+				body["referenceExternalTransactionId"] = tt.reference
+			}
+
+			response := doWagerRequest(
+				t,
+				ctx,
+				testServer.URL+"/wagering/transactions",
+				providerAToken,
+				"invalid-contract-"+string(rune('a'+index)),
+				body,
+			)
+			defer response.Body.Close()
+
+			if response.StatusCode != http.StatusBadRequest {
+				t.Fatalf("expected 400, got %d: %s", response.StatusCode, readBody(t, response))
+			}
+
+			var balanceAfter int64
+			var versionAfter int64
+			if err := pool.QueryRow(ctx, `SELECT balance, version FROM wallets WHERE id = $1`, walletID).Scan(&balanceAfter, &versionAfter); err != nil {
+				t.Fatalf("query wallet after invalid wager: %v", err)
+			}
+			if balanceAfter != balanceBefore || versionAfter != versionBefore {
+				t.Fatalf("wallet changed: before=(%d,%d) after=(%d,%d)", balanceBefore, versionBefore, balanceAfter, versionAfter)
+			}
+
+			var wagerCount int
+			if err := pool.QueryRow(ctx, `SELECT COUNT(*) FROM wager_transactions WHERE provider_id = 'provider-a' AND external_transaction_id = $1`, externalID).Scan(&wagerCount); err != nil {
+				t.Fatalf("count invalid wager rows: %v", err)
+			}
+			if wagerCount != 0 {
+				t.Fatalf("expected no invalid wager row, got %d", wagerCount)
+			}
+
+			var wagersAfter int
+			var ledgerAfter int
+			var outboxAfter int
+			if err := pool.QueryRow(ctx, `SELECT COUNT(*) FROM wager_transactions`).Scan(&wagersAfter); err != nil {
+				t.Fatalf("count wagers after invalid request: %v", err)
+			}
+			if err := pool.QueryRow(ctx, `SELECT COUNT(*) FROM ledger_entries`).Scan(&ledgerAfter); err != nil {
+				t.Fatalf("count ledger after invalid request: %v", err)
+			}
+			if err := pool.QueryRow(ctx, `SELECT COUNT(*) FROM outbox_events`).Scan(&outboxAfter); err != nil {
+				t.Fatalf("count outbox after invalid request: %v", err)
+			}
+			if wagersAfter != wagersBefore || ledgerAfter != ledgerBefore || outboxAfter != outboxBefore {
+				t.Fatalf(
+					"persistence changed: wagers %d->%d ledger %d->%d outbox %d->%d",
+					wagersBefore, wagersAfter, ledgerBefore, ledgerAfter, outboxBefore, outboxAfter,
+				)
+			}
+		})
+	}
+
 	t.Run("internal client cannot access provider wager endpoint", func(t *testing.T) {
 		body := wagerBody(
 			"internal-must-fail",

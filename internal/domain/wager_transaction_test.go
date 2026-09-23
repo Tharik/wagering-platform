@@ -177,3 +177,58 @@ func TestOpeningIsNotAnExternalWagerKind(t *testing.T) {
 		t.Fatal("OPENING must not be accepted as an external wager kind")
 	}
 }
+
+func TestWagerRequestValidateExternal(t *testing.T) {
+	tests := []struct {
+		name      string
+		kind      WagerKind
+		amount    int64
+		reference string
+		wantErr   error
+	}{
+		{name: "BET positive without reference", kind: WagerKindBet, amount: 1},
+		{name: "BET zero", kind: WagerKindBet, wantErr: ErrInvalidAmount},
+		{name: "BET negative", kind: WagerKindBet, amount: -1, wantErr: ErrInvalidAmount},
+		{name: "BET with reference", kind: WagerKindBet, amount: 1, reference: "bet-1", wantErr: ErrWagerReferenceNotAllowed},
+		{name: "WIN positive without reference", kind: WagerKindWin, amount: 1},
+		{name: "WIN positive with reference", kind: WagerKindWin, amount: 1, reference: "bet-1"},
+		{name: "WIN zero", kind: WagerKindWin, wantErr: ErrInvalidAmount},
+		{name: "WIN negative", kind: WagerKindWin, amount: -1, wantErr: ErrInvalidAmount},
+		{name: "LOSS zero without reference", kind: WagerKindLoss},
+		{name: "LOSS positive", kind: WagerKindLoss, amount: 1, wantErr: ErrInvalidLossAmount},
+		{name: "LOSS negative", kind: WagerKindLoss, amount: -1, wantErr: ErrInvalidLossAmount},
+		{name: "LOSS with reference", kind: WagerKindLoss, reference: "bet-1", wantErr: ErrWagerReferenceNotAllowed},
+		{name: "REFUND positive with reference", kind: WagerKindRefund, amount: 1, reference: "bet-1"},
+		{name: "REFUND zero with reference", kind: WagerKindRefund, reference: "bet-1", wantErr: ErrInvalidAmount},
+		{name: "REFUND negative with reference", kind: WagerKindRefund, amount: -1, reference: "bet-1", wantErr: ErrInvalidAmount},
+		{name: "REFUND without reference", kind: WagerKindRefund, amount: 1, wantErr: ErrWagerReferenceRequired},
+		{name: "ROLLBACK positive with reference", kind: WagerKindRollback, amount: 1, reference: "bet-1"},
+		{name: "ROLLBACK zero with reference", kind: WagerKindRollback, reference: "bet-1", wantErr: ErrInvalidAmount},
+		{name: "ROLLBACK negative with reference", kind: WagerKindRollback, amount: -1, reference: "bet-1", wantErr: ErrInvalidAmount},
+		{name: "ROLLBACK without reference", kind: WagerKindRollback, amount: 1, wantErr: ErrWagerReferenceRequired},
+		{name: "OPENING validates kind first", kind: WagerKind("OPENING"), amount: -1, reference: "bet-1", wantErr: ErrInvalidWagerKind},
+		{name: "unknown validates kind first", kind: WagerKind("UNKNOWN"), amount: -1, reference: "bet-1", wantErr: ErrInvalidWagerKind},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			request := WagerRequest{
+				Kind:                           tt.kind,
+				Amount:                         NewMoney(tt.amount, BRL),
+				ReferenceExternalTransactionID: tt.reference,
+			}
+
+			err := request.ValidateExternal()
+			if tt.wantErr == nil {
+				if err != nil {
+					t.Fatalf("expected valid request, got %v", err)
+				}
+				return
+			}
+
+			if !errors.Is(err, tt.wantErr) {
+				t.Fatalf("expected %v, got %v", tt.wantErr, err)
+			}
+		})
+	}
+}
