@@ -338,7 +338,7 @@ Schema evolution uses ordered, source-controlled SQL up/down migrations under `m
 
 Migration version and dirty state are stored in PostgreSQL. A failed/dirty migration prevents clean progression and causes the startup dependency to fail rather than launching the application against an uncertain schema. Recovery requires investigating the failed change and deliberately repairing the migration state; force/reset is not the normal workflow.
 
-Supported down/up operations make each migration reversible where defined and allow the same ordered history to be reproduced on a fresh database. Database constraints, triggers, enum values, and indexes are therefore versioned alongside application expectations.
+Migrations include explicit up/down definitions, but rollback is schema- and data-compatibility dependent. They allow the same ordered history to be reproduced on a fresh database when those compatibility preconditions hold. Migration `000006` is a concrete example: referenced `WIN` data is valid in version 6 but violates the older REFUND/ROLLBACK-only reference constraint restored by its down migration. PostgreSQL therefore rejects that rollback until operators deliberately resolve or migrate the incompatible data. This is normal forward-schema compatibility behavior, not a financial-integrity defect. Database constraints, triggers, enum values, and indexes remain versioned alongside application expectations.
 
 ## Observability and health
 

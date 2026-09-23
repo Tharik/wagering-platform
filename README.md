@@ -335,7 +335,7 @@ Committed events are stored in the transactional Outbox before background publis
 
 ## Database migrations
 
-Migrations are plain SQL under `migrations/`. `docker compose up --build` runs all pending migrations automatically before the application starts.
+Migrations are plain SQL under `migrations/`. `docker compose up --build` runs all pending migrations automatically before the application starts. Migrations provide explicit up/down operations, but a rollback requires the existing data to be compatible with the target schema.
 
 Apply all pending migrations explicitly:
 
@@ -346,7 +346,7 @@ docker compose run --rm migrate \
   up
 ```
 
-Revert one migration:
+Revert one migration when its data-compatibility preconditions are satisfied:
 
 ```bash
 docker compose run --rm migrate \
@@ -365,6 +365,8 @@ docker compose run --rm migrate \
 ```
 
 A dirty migration state blocks normal subsequent migration until an operator investigates and repairs it deliberately.
+
+Migration `000006` expands reference linkage to allow referenced `WIN` transactions. If rows with `kind = 'WIN'` and a non-null `referenced_transaction_id` exist, rolling back `000006` is not lossless or compatible: PostgreSQL rejects restoration of the older REFUND/ROLLBACK-only constraint. Operators must resolve or migrate incompatible data deliberately before attempting that rollback. The clean/fresh `down 1` and subsequent `up` example remains valid when no such version-6 data exists; deleting linkage, forcing the migration version, or resetting production data is not a recovery procedure.
 
 ## Testing
 
@@ -438,6 +440,17 @@ Run the supported harness:
 ```
 
 Run it from the repository root. It starts three independent application containers and repeats the process-level checks three times. The harness verifies two concurrent `80.00` BETs against a `100.00` wallet, cross-instance idempotency, independent-wallet processing, and direct database invariants. It intentionally leaves the Compose stack running for inspection.
+
+Stop that multi-instance stack with the same Compose files used by the harness:
+
+```bash
+docker compose \
+  -f docker-compose.yml \
+  -f docker-compose.multi.yml \
+  down
+```
+
+Using only the base `docker compose down` after the harness may report `app2` and `app3` as orphan containers. To intentionally reset disposable local test data as well, add `--volumes` to the matching multi-file command; volume removal is not the default cleanup workflow.
 
 ## Failure and recovery
 
