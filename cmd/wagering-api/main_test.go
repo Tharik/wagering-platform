@@ -5,48 +5,24 @@ import (
 	"testing"
 	"time"
 
-	"github.com/Tharik/wagering-platform/internal/application/wagering"
-	"github.com/Tharik/wagering-platform/internal/application/wallet"
-	"github.com/Tharik/wagering-platform/internal/infrastructure/httpapi"
-	"github.com/Tharik/wagering-platform/internal/observability"
 	"go.uber.org/fx"
 )
 
 func TestFxCompositionRootStartsAndStops(t *testing.T) {
-	t.Setenv("HTTP_ADDRESS", ":0")
+	testConfig := loadConfig()
+	testConfig.HTTPAddress = ":0"
+	var resolvedConfig config
 
 	app := fx.New(
-		fx.Provide(
-			loadConfig,
-			newDatabase,
-			newPool,
-			newSQSClient,
-			newAuthMiddleware,
-			newLogger,
-			observability.NewMetrics,
-
-			wagering.NewServiceWithMetrics,
-			wagering.NewMessageProcessor,
-			wallet.NewService,
-			wagering.NewPendingReferenceResolverWithMetrics,
-			newPendingReferenceWorker,
-
-			httpapi.NewWalletHandler,
-			httpapi.NewWagerHandler,
-			newHealthHandler,
-			newHTTPServer,
-			httpapi.NewMetricsHandler,
-
-			newSQSConsumer,
-			newSQSPublisher,
-			newOutboxPublisher,
-			newDLQMonitor,
-
-			newConsumerWorker,
-			newOutboxWorker,
-		),
-		fx.Invoke(registerLifecycle),
+		applicationModule,
+		fx.Replace(testConfig),
+		fx.Invoke(func(cfg config) {
+			resolvedConfig = cfg
+		}),
 	)
+	if resolvedConfig.HTTPAddress != ":0" {
+		t.Fatalf("test config replacement was not injected: %+v", resolvedConfig)
+	}
 
 	startCtx, cancelStart := context.WithTimeout(
 		context.Background(),
