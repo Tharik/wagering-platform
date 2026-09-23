@@ -366,7 +366,7 @@ gofmt -l $(find . -name '*.go' -not -path './.git/*')
 git diff --check
 ```
 
-The suite covers financial concurrency, idempotency races, provider isolation, HTTP/SQS cross-channel identity, Inbox/Outbox recovery, SQS retry/redrive, pending references, reconciliation, migrations, graceful shutdown, and process-level multi-instance behavior.
+The normal suite covers financial concurrency, idempotency races, provider isolation, HTTP/SQS cross-channel identity, Inbox/Outbox recovery, SQS retry/redrive, pending references, reconciliation, migrations, and graceful shutdown. The dedicated harness below provides real process-level three-instance verification.
 
 ## Multi-instance verification
 
