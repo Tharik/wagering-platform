@@ -329,6 +329,17 @@ Official inbound command shape:
 }
 ```
 
+FIFO routing identity is part of the producer contract:
+
+| Flow | `MessageGroupId` | `MessageDeduplicationId` | Rationale |
+| --- | --- | --- | --- |
+| Inbound `WagerTransactionRequested` | `walletId` | `messageId` | Commands for one wallet remain ordered, while different wallets can proceed independently. The `messageId` is also the transport identity used by the durable Inbox. |
+| Outbound domain event | `aggregateId` | `eventId` | Events for one aggregate remain ordered. The `eventId` is generated and persisted with the Outbox row, so every retry uses the same identity. |
+
+FIFO ordering and deduplication are additional transport guarantees; financial correctness does not depend on SQS FIFO deduplication. PostgreSQL transactionality, Inbox `messageId` plus raw-payload hash handling, persistent wager idempotency, wallet locking/versioning, and the Outbox's persisted `eventId` remain authoritative.
+
+Outbox publication is intentionally at least once. An external publish can succeed while the PostgreSQL transaction that confirms `published_at` fails. The row then remains pending and may be published again with the same `eventId` and `MessageDeduplicationId`; downstream consumers must deduplicate that stable identity.
+
 Inbound delivery is at least once. Inbox registration, wagering work, and Inbox completion share the database transaction, and an SQS message is deleted only after that transaction commits. Poison commands are moved by the native SQS redrive policy after `maxReceiveCount`.
 
 Committed events are stored in the transactional Outbox before background publishers send them to `wager-events.fifo`. Publication is at least once; event IDs remain stable across retries for downstream deduplication.
