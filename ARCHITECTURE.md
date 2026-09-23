@@ -353,6 +353,60 @@ Therefore, duplicate messages are expected behavior rather than exceptional beha
 
 A message is deleted from SQS only after the corresponding database transaction commits successfully.
 
+### Messaging security and IAM
+
+The runtime components share one process and AWS identity today, but their permissions can be understood independently:
+
+| Component | Queue | Required operations | Reason |
+| --- | --- | --- | --- |
+| Inbound consumer | `wager-transactions.fifo` | `sqs:ReceiveMessage`, `sqs:DeleteMessage`, `sqs:ChangeMessageVisibility` | Receive commands, acknowledge durable processing, and schedule retry visibility. |
+| Readiness check | `wager-transactions.fifo` | `sqs:GetQueueAttributes` | Verify access to the configured command queue. |
+| Outbox publisher | `wager-events.fifo` | `sqs:SendMessage` | Publish committed Outbox events. |
+| DLQ monitor | `wager-transactions-dlq.fifo` | `sqs:GetQueueAttributes` | Observe approximate DLQ depth for metrics. |
+
+A combined least-privilege policy for the current single runtime identity is:
+
+```json
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "ConsumeWagerCommands",
+      "Effect": "Allow",
+      "Action": [
+        "sqs:ReceiveMessage",
+        "sqs:DeleteMessage",
+        "sqs:ChangeMessageVisibility",
+        "sqs:GetQueueAttributes"
+      ],
+      "Resource": "arn:aws:sqs:<region>:<account-id>:wager-transactions.fifo"
+    },
+    {
+      "Sid": "PublishWagerEvents",
+      "Effect": "Allow",
+      "Action": "sqs:SendMessage",
+      "Resource": "arn:aws:sqs:<region>:<account-id>:wager-events.fifo"
+    },
+    {
+      "Sid": "ObserveCommandDLQ",
+      "Effect": "Allow",
+      "Action": "sqs:GetQueueAttributes",
+      "Resource": "arn:aws:sqs:<region>:<account-id>:wager-transactions-dlq.fifo"
+    }
+  ]
+}
+```
+
+SQS native redrive moves poison commands to `wager-transactions-dlq.fifo` after `maxReceiveCount`. The application does not require `sqs:SendMessage` on that DLQ; its monitor only reads queue depth and does not receive or delete messages. The local environment also provisions `wager-events-dlq.fifo`, but the application does not currently monitor or consume it.
+
+Queue administration belongs to a separate infrastructure, deployment, bootstrap, or test identity. Local provisioning uses `sqs:CreateQueue`, `sqs:GetQueueUrl`, `sqs:GetQueueAttributes`, and `sqs:SetQueueAttributes`; integration-test cleanup also uses `sqs:DeleteQueue`. These administrative actions, redrive configuration, and `sqs:PurgeQueue` are not normal runtime permissions.
+
+Production credentials should be short-lived and supplied through an IAM role or workload identity using the standard AWS SDK credential chain. Suitable mechanisms include ECS task roles, EKS IRSA or Pod Identity, and EC2 instance roles. The `test` credentials in Docker Compose are disposable LocalStack values, not production examples. The LocalStack endpoint override is development-only; production uses AWS SQS service endpoints over TLS. Private connectivity through a VPC endpoint is an optional deployment hardening measure, and queues must not be publicly readable or writable.
+
+Production queues should use SQS server-side encryption as appropriate. A customer-managed KMS key is optional according to deployment requirements and requires corresponding KMS permissions for the relevant producers and consumers.
+
+Command and event payloads contain business and operational data, including player IDs, wallet IDs, transaction IDs, and monetary values. Queue and log access should therefore be limited accordingly. The application does not log AWS credentials, bearer tokens, or complete SQS message bodies. It does log selected operational identifiers for observability.
+
 ---
 
 ## 14. Transactional Inbox

@@ -2,11 +2,48 @@ package main
 
 import (
 	"context"
+	"net/http"
+	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
+	"github.com/aws/aws-sdk-go-v2/service/sqs"
 	"go.uber.org/fx"
 )
+
+func TestSQSClientUsesDefaultCredentialChain(t *testing.T) {
+	t.Setenv("AWS_ACCESS_KEY_ID", "environment-access-key")
+	t.Setenv("AWS_SECRET_ACCESS_KEY", "environment-secret-key")
+	t.Setenv("AWS_SESSION_TOKEN", "environment-session-token")
+	t.Setenv("AWS_EC2_METADATA_DISABLED", "true")
+
+	var authorization string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		authorization = r.Header.Get("Authorization")
+		w.Header().Set("Content-Type", "application/x-amz-json-1.0")
+		_, _ = w.Write([]byte(`{"Attributes":{"QueueArn":"arn:aws:sqs:us-east-1:123456789012:test.fifo"}}`))
+	}))
+	defer server.Close()
+
+	client, err := newSQSClient(config{
+		AWSRegion:   "us-east-1",
+		SQSEndpoint: server.URL,
+	})
+	if err != nil {
+		t.Fatalf("create SQS client: %v", err)
+	}
+
+	_, err = client.GetQueueAttributes(context.Background(), &sqs.GetQueueAttributesInput{
+		QueueUrl: &server.URL,
+	})
+	if err != nil {
+		t.Fatalf("call local SQS endpoint: %v", err)
+	}
+	if !strings.Contains(authorization, "Credential=environment-access-key/") {
+		t.Fatalf("expected request signed with environment credentials, got %q", authorization)
+	}
+}
 
 func TestFxCompositionRootStartsAndStops(t *testing.T) {
 	testConfig := loadConfig()

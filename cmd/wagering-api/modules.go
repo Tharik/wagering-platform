@@ -13,7 +13,7 @@ import (
 	"github.com/Tharik/wagering-platform/internal/observability"
 	"github.com/Tharik/wagering-platform/internal/worker"
 	"github.com/aws/aws-sdk-go-v2/aws"
-	"github.com/aws/aws-sdk-go-v2/credentials"
+	awsconfig "github.com/aws/aws-sdk-go-v2/config"
 	awssqs "github.com/aws/aws-sdk-go-v2/service/sqs"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"go.uber.org/fx"
@@ -133,23 +133,23 @@ func newAuthMiddleware(cfg config) (*httpapi.AuthMiddleware, error) {
 	)
 }
 
-func newSQSClient(cfg config) *awssqs.Client {
-	options := awssqs.Options{
-		Region: cfg.AWSRegion,
-		Credentials: aws.NewCredentialsCache(
-			credentials.NewStaticCredentialsProvider(
-				"test",
-				"test",
-				"",
-			),
-		),
+func newSQSClient(cfg config) (*awssqs.Client, error) {
+	awsConfig, err := awsconfig.LoadDefaultConfig(
+		context.Background(),
+		awsconfig.WithRegion(cfg.AWSRegion),
+	)
+	if err != nil {
+		return nil, err
 	}
 
-	if cfg.SQSEndpoint != "" {
-		options.BaseEndpoint = aws.String(cfg.SQSEndpoint)
-	}
-
-	return awssqs.New(options)
+	return awssqs.NewFromConfig(
+		awsConfig,
+		func(options *awssqs.Options) {
+			if cfg.SQSEndpoint != "" {
+				options.BaseEndpoint = aws.String(cfg.SQSEndpoint)
+			}
+		},
+	), nil
 }
 
 func newWalletService(
