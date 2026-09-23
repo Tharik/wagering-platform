@@ -222,8 +222,12 @@ func (s *Service) ProcessTx(
 	var reference *referencedTransaction
 	var reversalMovement movementDirection
 
-	if cmd.Request.Kind == domain.WagerKindRefund ||
-		cmd.Request.Kind == domain.WagerKindRollback {
+	hasReference := cmd.Request.ReferenceExternalTransactionID != ""
+	requiresReferenceResolution := cmd.Request.Kind == domain.WagerKindRefund ||
+		cmd.Request.Kind == domain.WagerKindRollback ||
+		(cmd.Request.Kind == domain.WagerKindWin && hasReference)
+
+	if requiresReferenceResolution {
 
 		foundReference, found, err := findReferencedTransaction(
 			ctx,
@@ -307,40 +311,44 @@ func (s *Service) ProcessTx(
 			return result, nil
 		}
 
-		alreadyReversed, err := referenceAlreadyReversed(
-			ctx,
-			tx,
-			foundReference.ID,
-		)
-		if err != nil {
-			return ProcessResult{}, err
-		}
-
-		if alreadyReversed {
-			result, err := persistRejectedTransaction(
+		if cmd.Request.Kind == domain.WagerKindWin {
+			reference = &foundReference
+		} else {
+			alreadyReversed, err := referenceAlreadyReversed(
 				ctx,
 				tx,
-				cmd,
-				payloadHash,
-				wallet,
-				failureCodeAlreadyReversed,
-				&foundReference.ID,
+				foundReference.ID,
 			)
 			if err != nil {
 				return ProcessResult{}, err
 			}
-			return result, nil
-		}
 
-		reversalMovement, err = reversalDirection(
-			cmd.Request.Kind,
-			foundReference,
-		)
-		if err != nil {
-			return ProcessResult{}, err
-		}
+			if alreadyReversed {
+				result, err := persistRejectedTransaction(
+					ctx,
+					tx,
+					cmd,
+					payloadHash,
+					wallet,
+					failureCodeAlreadyReversed,
+					&foundReference.ID,
+				)
+				if err != nil {
+					return ProcessResult{}, err
+				}
+				return result, nil
+			}
 
-		reference = &foundReference
+			reversalMovement, err = reversalDirection(
+				cmd.Request.Kind,
+				foundReference,
+			)
+			if err != nil {
+				return ProcessResult{}, err
+			}
+
+			reference = &foundReference
+		}
 	}
 
 	balanceBefore := wallet.Balance

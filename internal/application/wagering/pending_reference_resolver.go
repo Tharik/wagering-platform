@@ -219,46 +219,52 @@ func (r *PendingReferenceResolver) ResolveOne(
 		return true, nil
 	}
 
-	alreadyReversed, err := referenceAlreadyReversed(
-		ctx,
-		tx,
-		reference.ID,
-	)
-	if err != nil {
-		return false, err
-	}
+	var direction movementDirection
 
-	if alreadyReversed {
-		if err := rejectPendingReference(
+	if pending.Request.Kind == domain.WagerKindWin {
+		direction = movementCredit
+	} else {
+		alreadyReversed, err := referenceAlreadyReversed(
 			ctx,
 			tx,
-			pending,
-			wallet,
-			failureCodeAlreadyReversed,
-			now,
-			&reference.ID,
-		); err != nil {
+			reference.ID,
+		)
+		if err != nil {
 			return false, err
 		}
 
-		if err := tx.Commit(ctx); err != nil {
-			return false, fmt.Errorf(
-				"commit already reversed pending reference: %w",
-				err,
-			)
+		if alreadyReversed {
+			if err := rejectPendingReference(
+				ctx,
+				tx,
+				pending,
+				wallet,
+				failureCodeAlreadyReversed,
+				now,
+				&reference.ID,
+			); err != nil {
+				return false, err
+			}
+
+			if err := tx.Commit(ctx); err != nil {
+				return false, fmt.Errorf(
+					"commit already reversed pending reference: %w",
+					err,
+				)
+			}
+
+			r.metrics.IncWagersRejected()
+
+			return true, nil
 		}
 
-		r.metrics.IncWagersRejected()
-
-		return true, nil
-	}
-
-	direction, err := reversalDirection(
-		pending.Request.Kind,
-		reference,
-	)
-	if err != nil {
-		return false, err
+		direction, err = reversalDirection(
+			pending.Request.Kind,
+			reference,
+		)
+		if err != nil {
+			return false, err
+		}
 	}
 
 	balanceBefore := wallet.Balance

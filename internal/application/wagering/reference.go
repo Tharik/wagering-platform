@@ -117,6 +117,11 @@ func validateReference(
 	}
 
 	switch request.Kind {
+	case domain.WagerKindWin:
+		if reference.Kind != domain.WagerKindBet {
+			return ErrInvalidReferenceKind
+		}
+
 	case domain.WagerKindRefund:
 		// REFUND is only valid for a previously processed BET.
 		if reference.Kind != domain.WagerKindBet {
