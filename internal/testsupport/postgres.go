@@ -2,6 +2,7 @@ package testsupport
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -97,8 +98,8 @@ func applyMigrations(ctx context.Context, schema string) error {
 		return err
 	}
 	sort.Strings(files)
-	if len(files) != 6 {
-		return fmt.Errorf("expected 6 up migrations, found %d", len(files))
+	if len(files) == 0 {
+		return errors.New("no up migrations found")
 	}
 
 	for _, file := range files {

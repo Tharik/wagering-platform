@@ -54,28 +54,30 @@ func TestAuthMiddlewareValidatesOIDCEdgeCases(t *testing.T) {
 	}
 	validToken := signTestJWT(t, trustedKey, testJWTKeyID, validClaims)
 
-	t.Run("valid token sets authenticated principal", func(t *testing.T) {
-		called := false
-		handler := auth.Authenticate(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			called = true
-			principal, ok := PrincipalFromContext(r.Context())
-			if !ok {
-				t.Fatal("authenticated request has no principal")
-			}
-			if principal.ClientID != "provider-a" {
-				t.Fatalf("expected provider-a principal, got %q", principal.ClientID)
-			}
-			w.WriteHeader(http.StatusNoContent)
-		}))
+	for _, scheme := range []string{"Bearer", "bearer", "BEARER"} {
+		t.Run("valid "+scheme+" scheme sets authenticated principal", func(t *testing.T) {
+			called := false
+			handler := auth.Authenticate(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				called = true
+				principal, ok := PrincipalFromContext(r.Context())
+				if !ok {
+					t.Fatal("authenticated request has no principal")
+				}
+				if principal.ClientID != "provider-a" {
+					t.Fatalf("expected provider-a principal, got %q", principal.ClientID)
+				}
+				w.WriteHeader(http.StatusNoContent)
+			}))
 
-		response := executeAuthRequest(handler, "Bearer "+validToken)
-		if response.Code != http.StatusNoContent {
-			t.Fatalf("expected 204, got %d: %s", response.Code, response.Body.String())
-		}
-		if !called {
-			t.Fatal("valid token did not reach downstream handler")
-		}
-	})
+			response := executeAuthRequest(handler, scheme+" "+validToken)
+			if response.Code != http.StatusNoContent {
+				t.Fatalf("expected 204, got %d: %s", response.Code, response.Body.String())
+			}
+			if !called {
+				t.Fatal("valid token did not reach downstream handler")
+			}
+		})
+	}
 
 	expired := validClaims
 	expired.Expiry = now.Add(-10 * time.Minute).Unix()

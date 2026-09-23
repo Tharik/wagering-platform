@@ -171,16 +171,12 @@ func bearerToken(
 	r *http.Request,
 ) (string, error) {
 	header := r.Header.Get("Authorization")
-
-	const prefix = "Bearer "
-
-	if !strings.HasPrefix(header, prefix) {
+	scheme, credential, found := strings.Cut(header, " ")
+	if !found || !strings.EqualFold(scheme, "Bearer") {
 		return "", errors.New("missing bearer token")
 	}
 
-	token := strings.TrimSpace(
-		strings.TrimPrefix(header, prefix),
-	)
+	token := strings.TrimSpace(credential)
 
 	if token == "" {
 		return "", errors.New("missing bearer token")
