@@ -1,13 +1,17 @@
 package outbox
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
+	"strings"
 	"sync"
 	"testing"
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -390,6 +394,130 @@ func TestPendingEventIsRepublishedWithSameEventIDAfterFailedAttempt(t *testing.T
 	}
 }
 
+func TestPublishedEventIsRepublishedWithSameEventIDWhenConfirmationCommitFails(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+
+	pool := newTestPool(t, ctx)
+	t.Cleanup(pool.Close)
+
+	cleanOutbox(t, ctx, pool)
+
+	eventID, initialNextAttemptAt, persistedPayload := insertTestEnvelopeEvent(t, ctx, pool)
+	dropCommitFailureTrigger := installDeferredCommitFailureTrigger(t, ctx, pool)
+	t.Cleanup(dropCommitFailureTrigger)
+
+	firstExternalPublisher := &fakeMessagePublisher{}
+	firstPublisher := NewPublisher(pool, firstExternalPublisher)
+
+	count, err := firstPublisher.PublishBatch(ctx)
+	if err == nil {
+		t.Fatal("expected publication confirmation commit to fail")
+	}
+	if count != 1 {
+		t.Fatalf("expected one externally published event before commit failure, got %d", count)
+	}
+	if len(firstExternalPublisher.events) != 1 {
+		t.Fatalf("expected one successful external Publish call, got %d", len(firstExternalPublisher.events))
+	}
+
+	var pgErr *pgconn.PgError
+	if !errors.As(err, &pgErr) ||
+		pgErr.Code != "P0001" ||
+		!strings.Contains(pgErr.Message, "test deferred outbox confirmation failure") {
+		t.Fatalf("expected deliberate deferred-trigger commit failure, got %v", err)
+	}
+
+	var (
+		persistedID       uuid.UUID
+		publishedAt       *time.Time
+		attempts          int
+		nextAttemptAt     time.Time
+		payloadAfterError []byte
+	)
+	if err := pool.QueryRow(ctx, `
+		SELECT id, published_at, attempts, next_attempt_at, payload
+		FROM outbox_events
+		WHERE id = $1
+	`, eventID).Scan(
+		&persistedID,
+		&publishedAt,
+		&attempts,
+		&nextAttemptAt,
+		&payloadAfterError,
+	); err != nil {
+		t.Fatalf("query event after failed confirmation commit: %v", err)
+	}
+	if persistedID != eventID {
+		t.Fatalf("persisted event ID changed: got %s, want %s", persistedID, eventID)
+	}
+	if publishedAt != nil {
+		t.Fatalf("expected published_at rollback to NULL, got %s", publishedAt)
+	}
+	if attempts != 0 {
+		t.Fatalf("expected retry attempts to remain 0, got %d", attempts)
+	}
+	if !nextAttemptAt.Equal(initialNextAttemptAt) {
+		t.Fatalf("next_attempt_at changed: got %s, want %s", nextAttemptAt, initialNextAttemptAt)
+	}
+	if !bytes.Equal(payloadAfterError, persistedPayload) {
+		t.Fatalf("persisted payload changed after rollback: got %s, want %s", payloadAfterError, persistedPayload)
+	}
+
+	dropCommitFailureTrigger()
+
+	secondExternalPublisher := &fakeMessagePublisher{}
+	secondPublisher := NewPublisher(pool, secondExternalPublisher)
+
+	count, err = secondPublisher.PublishBatch(ctx)
+	if err != nil {
+		t.Fatalf("recover pending event: %v", err)
+	}
+	if count != 1 {
+		t.Fatalf("expected one recovered publication, got %d", count)
+	}
+	if len(secondExternalPublisher.events) != 1 {
+		t.Fatalf("expected one recovery Publish call, got %d", len(secondExternalPublisher.events))
+	}
+
+	firstEvent := firstExternalPublisher.events[0]
+	secondEvent := secondExternalPublisher.events[0]
+	firstEnvelopeID := payloadEventID(t, firstEvent.Payload)
+	secondEnvelopeID := payloadEventID(t, secondEvent.Payload)
+
+	if firstEvent.ID != eventID || secondEvent.ID != eventID {
+		t.Fatalf(
+			"expected persisted event ID %s on both publications, got first=%s second=%s",
+			eventID,
+			firstEvent.ID,
+			secondEvent.ID,
+		)
+	}
+	if firstEnvelopeID != eventID.String() || secondEnvelopeID != eventID.String() {
+		t.Fatalf(
+			"expected payload eventId %s on both publications, got first=%s second=%s",
+			eventID,
+			firstEnvelopeID,
+			secondEnvelopeID,
+		)
+	}
+	if !bytes.Equal(firstEvent.Payload, secondEvent.Payload) ||
+		!bytes.Equal(firstEvent.Payload, persistedPayload) {
+		t.Fatalf("expected identical persisted payload on both publications: first=%s second=%s", firstEvent.Payload, secondEvent.Payload)
+	}
+
+	if err := pool.QueryRow(
+		ctx,
+		`SELECT published_at FROM outbox_events WHERE id = $1`,
+		eventID,
+	).Scan(&publishedAt); err != nil {
+		t.Fatalf("query recovered publication confirmation: %v", err)
+	}
+	if publishedAt == nil {
+		t.Fatal("expected recovery transaction to commit published_at")
+	}
+}
+
 func newTestPool(
 	t *testing.T,
 	ctx context.Context,
@@ -469,6 +597,107 @@ func insertTestEvent(
 	}
 
 	return eventID
+}
+
+func insertTestEnvelopeEvent(
+	t *testing.T,
+	ctx context.Context,
+	pool *pgxpool.Pool,
+) (uuid.UUID, time.Time, []byte) {
+	t.Helper()
+
+	eventID := uuid.New()
+	aggregateID := uuid.New()
+	eligibleAt := time.Now().UTC().Add(-time.Second).Truncate(time.Microsecond)
+	payload, err := json.Marshal(map[string]any{
+		"eventId":     eventID.String(),
+		"eventType":   "TestEvent",
+		"aggregateId": aggregateID.String(),
+		"occurredAt":  eligibleAt.Format(time.RFC3339Nano),
+		"version":     1,
+		"data": map[string]string{
+			"message": "hello",
+		},
+	})
+	if err != nil {
+		t.Fatalf("marshal test event envelope: %v", err)
+	}
+
+	_, err = pool.Exec(ctx, `
+		INSERT INTO outbox_events (
+			id, aggregate_id, event_type, payload, occurred_at, attempts, next_attempt_at
+		) VALUES ($1, $2, 'TestEvent', $3::jsonb, $4, 0, $4)
+	`, eventID, aggregateID, payload, eligibleAt)
+	if err != nil {
+		t.Fatalf("insert test envelope event: %v", err)
+	}
+
+	var persistedPayload []byte
+	if err := pool.QueryRow(
+		ctx,
+		`SELECT payload FROM outbox_events WHERE id = $1`,
+		eventID,
+	).Scan(&persistedPayload); err != nil {
+		t.Fatalf("query persisted test envelope: %v", err)
+	}
+
+	return eventID, eligibleAt, persistedPayload
+}
+
+func installDeferredCommitFailureTrigger(
+	t *testing.T,
+	ctx context.Context,
+	pool *pgxpool.Pool,
+) func() {
+	t.Helper()
+
+	_, err := pool.Exec(ctx, `
+		CREATE FUNCTION test_fail_outbox_confirmation_commit()
+		RETURNS TRIGGER AS $$
+		BEGIN
+			IF OLD.published_at IS NULL AND NEW.published_at IS NOT NULL THEN
+				RAISE EXCEPTION 'test deferred outbox confirmation failure';
+			END IF;
+			RETURN NEW;
+		END;
+		$$ LANGUAGE plpgsql;
+
+		CREATE CONSTRAINT TRIGGER test_fail_outbox_confirmation_commit
+		AFTER UPDATE ON outbox_events
+		DEFERRABLE INITIALLY DEFERRED
+		FOR EACH ROW
+		EXECUTE FUNCTION test_fail_outbox_confirmation_commit();
+	`)
+	if err != nil {
+		t.Fatalf("install deferred confirmation failure trigger: %v", err)
+	}
+
+	var once sync.Once
+	return func() {
+		once.Do(func() {
+			cleanupCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+
+			_, cleanupErr := pool.Exec(cleanupCtx, `
+				DROP TRIGGER IF EXISTS test_fail_outbox_confirmation_commit ON outbox_events;
+				DROP FUNCTION IF EXISTS test_fail_outbox_confirmation_commit();
+			`)
+			if cleanupErr != nil {
+				t.Errorf("remove deferred confirmation failure trigger: %v", cleanupErr)
+			}
+		})
+	}
+}
+
+func payloadEventID(t *testing.T, payload []byte) string {
+	t.Helper()
+	var envelope struct {
+		EventID string `json:"eventId"`
+	}
+	if err := json.Unmarshal(payload, &envelope); err != nil {
+		t.Fatalf("decode published event envelope: %v", err)
+	}
+	return envelope.EventID
 }
 
 type blockingMessagePublisher struct {
