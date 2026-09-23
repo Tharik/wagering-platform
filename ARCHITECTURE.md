@@ -244,6 +244,14 @@ Some reversals require debiting the wallet.
 
 If the wallet no longer contains enough funds for the reversal, the transaction is rejected with a distinct insufficient-funds result instead of making the wallet negative.
 
+### Persisted wager lifecycle
+
+The runtime actively writes `PENDING_REFERENCE`, `PROCESSED`, and `REJECTED` wager states.
+
+`PENDING` and `FAILED` remain in the persisted state type for compatibility. The current runtime does not write either state. Readers treat `PENDING` as unresolved and `FAILED` as terminal unsuccessful when encountered.
+
+Infrastructure failures roll back the transaction instead of creating a durable `FAILED` wager. There is currently no `WagerTransactionFailed` event.
+
 ---
 
 ## 10. Out-of-order references

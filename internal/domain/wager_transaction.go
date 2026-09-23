@@ -20,11 +20,16 @@ const (
 type WagerState string
 
 const (
+	// WagerStatePending is reserved for persisted unresolved wagers. The current
+	// runtime does not create it, and readers treat it as non-terminal.
 	WagerStatePending          WagerState = "PENDING"
 	WagerStatePendingReference WagerState = "PENDING_REFERENCE"
 	WagerStateProcessed        WagerState = "PROCESSED"
 	WagerStateRejected         WagerState = "REJECTED"
-	WagerStateFailed           WagerState = "FAILED"
+	// WagerStateFailed is reserved for persisted terminal unsuccessful wagers.
+	// Readers treat it as terminal unsuccessful. The current runtime rolls back
+	// infrastructure failures instead of creating it.
+	WagerStateFailed WagerState = "FAILED"
 )
 
 var (

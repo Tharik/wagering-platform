@@ -111,6 +111,121 @@ func TestReferenceToTerminalUnsuccessfulTransactionIsDurablyRejected(t *testing.
 	}
 }
 
+func TestReferenceToReservedFailedTransactionIsDurablyRejected(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+
+	pool, err := pgxpool.New(ctx, "postgres://wagering:wagering@localhost:5432/wagering?sslmode=disable")
+	if err != nil {
+		t.Fatalf("connect postgres: %v", err)
+	}
+	defer pool.Close()
+	cleanDatabase(t, ctx, pool)
+
+	createdWallet, err := wallet.NewService(pool).Create(ctx, wallet.CreateWalletCommand{
+		PlayerID:       "player-failed-reference",
+		InitialBalance: domain.NewMoney(1000, domain.BRL),
+	})
+	if err != nil {
+		t.Fatalf("create wallet: %v", err)
+	}
+
+	service := NewService(pool)
+	reference, err := service.Process(ctx, ProcessCommand{
+		IdempotencyKey: "failed-reference",
+		Request: domain.WagerRequest{
+			ProviderID:            "provider-a",
+			ExternalTransactionID: "failed-bet",
+			PlayerID:              "player-failed-reference",
+			WalletID:              createdWallet.WalletID,
+			RoundID:               "round-1",
+			GameID:                "game-1",
+			Kind:                  domain.WagerKindBet,
+			Amount:                domain.NewMoney(2000, domain.BRL),
+		},
+	})
+	if err != nil || reference.State != domain.WagerStateRejected {
+		t.Fatalf("create terminal reference: result=%+v err=%v", reference, err)
+	}
+	if _, err := pool.Exec(ctx, `UPDATE wager_transactions SET state = 'FAILED' WHERE id = $1`, reference.TransactionID); err != nil {
+		t.Fatalf("reconstitute reserved FAILED reference: %v", err)
+	}
+
+	result, err := service.Process(ctx, ProcessCommand{
+		IdempotencyKey: "refund-failed-reference",
+		Request: domain.WagerRequest{
+			ProviderID:                     "provider-a",
+			ExternalTransactionID:          "refund-failed-bet",
+			PlayerID:                       "player-failed-reference",
+			WalletID:                       createdWallet.WalletID,
+			RoundID:                        "round-1",
+			GameID:                         "game-1",
+			Kind:                           domain.WagerKindRefund,
+			Amount:                         domain.NewMoney(2000, domain.BRL),
+			ReferenceExternalTransactionID: "failed-bet",
+		},
+	})
+	if err != nil {
+		t.Fatalf("process FAILED reference: %v", err)
+	}
+	if result.State != domain.WagerStateRejected || result.FailureCode != failureCodeReferenceTerminalUnsuccessful {
+		t.Fatalf("unexpected result: %+v", result)
+	}
+
+	var (
+		state           string
+		failureCode     string
+		referencedID    string
+		balance         int64
+		version         int64
+		ledgerCount     int
+		rejectedEvents  int
+		processedEvents int
+		retryMetadata   int
+	)
+	if err := pool.QueryRow(ctx, `
+		SELECT state, failure_code, referenced_transaction_id::text,
+		       CASE WHEN reference_next_attempt_at IS NULL AND reference_expires_at IS NULL THEN 0 ELSE 1 END
+		FROM wager_transactions
+		WHERE id = $1
+	`, result.TransactionID).Scan(&state, &failureCode, &referencedID, &retryMetadata); err != nil {
+		t.Fatalf("query dependent wager: %v", err)
+	}
+	if state != string(domain.WagerStateRejected) || failureCode != failureCodeReferenceTerminalUnsuccessful {
+		t.Fatalf("expected terminal unsuccessful rejection, got state=%s code=%s", state, failureCode)
+	}
+	if referencedID != reference.TransactionID {
+		t.Fatalf("expected reference linkage %s, got %s", reference.TransactionID, referencedID)
+	}
+	if retryMetadata != 0 {
+		t.Fatal("expected terminal dependent without pending-reference retry metadata")
+	}
+	if err := pool.QueryRow(ctx, `SELECT balance, version FROM wallets WHERE id = $1`, createdWallet.WalletID).Scan(&balance, &version); err != nil {
+		t.Fatalf("query wallet: %v", err)
+	}
+	if balance != 1000 || version != 1 {
+		t.Fatalf("expected unchanged wallet 1000/version 1, got %d/version %d", balance, version)
+	}
+	if err := pool.QueryRow(ctx, `SELECT COUNT(*) FROM ledger_entries WHERE transaction_id = $1`, result.TransactionID).Scan(&ledgerCount); err != nil {
+		t.Fatalf("count ledger entries: %v", err)
+	}
+	if ledgerCount != 0 {
+		t.Fatalf("expected no dependent ledger entry, got %d", ledgerCount)
+	}
+	if err := pool.QueryRow(ctx, `
+		SELECT
+			COUNT(*) FILTER (WHERE event_type = 'WagerTransactionRejected'),
+			COUNT(*) FILTER (WHERE event_type = 'WagerTransactionProcessed')
+		FROM outbox_events
+		WHERE aggregate_id = $1
+	`, result.TransactionID).Scan(&rejectedEvents, &processedEvents); err != nil {
+		t.Fatalf("count dependent events: %v", err)
+	}
+	if rejectedEvents != 1 || processedEvents != 0 {
+		t.Fatalf("expected one rejected and no processed event, got rejected=%d processed=%d", rejectedEvents, processedEvents)
+	}
+}
+
 func TestExistingPendingReferenceKeepsDependentPending(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
