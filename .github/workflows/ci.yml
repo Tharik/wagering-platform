@@ -1,0 +1,108 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+  checks: write
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      DATABASE_URL: postgres://wagering:wagering@localhost:5432/wagering?sslmode=disable
+      AWS_REGION: us-east-1
+      AWS_ACCESS_KEY_ID: test
+      AWS_SECRET_ACCESS_KEY: test
+      SQS_ENDPOINT: http://localhost:4566
+      SQS_COMMANDS_QUEUE_URL: http://localhost:4566/000000000000/wager-transactions.fifo
+      SQS_COMMANDS_DLQ_URL: http://localhost:4566/000000000000/wager-transactions-dlq.fifo
+      SQS_EVENTS_QUEUE_URL: http://localhost:4566/000000000000/wager-events.fifo
+      OIDC_ISSUER: http://localhost:8081/realms/wagering
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Check module metadata
+        run: |
+          go mod tidy
+          git diff --exit-code -- go.mod go.sum
+          go mod verify
+
+      - name: Check formatting
+        run: test -z "$(gofmt -l .)"
+
+      - name: Run static analysis
+        run: go vet ./...
+
+      - name: Start integration dependencies
+        run: docker compose up -d --wait postgres localstack keycloak
+
+      - name: Run test suite
+        run: go test -json ./... -count=1 -timeout=180s > test-results.json
+
+      - name: Publish test report
+        if: ${{ !cancelled() }}
+        uses: dorny/test-reporter@v3
+        with:
+          name: Go Tests
+          path: test-results.json
+          reporter: golang-json
+
+      - name: Run race test suite
+        run: go test -race ./... -count=1 -timeout=300s
+
+      - name: Show Compose diagnostics
+        if: failure()
+        run: |
+          docker compose ps
+          docker compose logs --no-color
+
+      - name: Clean up Compose resources
+        if: always()
+        run: docker compose down --volumes
+
+  multi-instance:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Run multi-instance harness
+        run: ./scripts/multi-instance-test.sh
+
+      - name: Show Compose diagnostics
+        if: failure()
+        run: |
+          docker compose \
+            -f docker-compose.yml \
+            -f docker-compose.multi.yml \
+            ps
+          docker compose \
+            -f docker-compose.yml \
+            -f docker-compose.multi.yml \
+            logs --no-color
+
+      - name: Clean up Compose resources
+        if: always()
+        run: |
+          docker compose \
+            -f docker-compose.yml \
+            -f docker-compose.multi.yml \
+            down --volumes
