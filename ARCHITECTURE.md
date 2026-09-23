@@ -146,6 +146,8 @@ Pending-reference state includes retry attempts, next-attempt time, expiry, and 
 
 Because state is durable, resolution survives process restart and may be performed by another instance. Final processed or rejected events preserve the original correlation and optional causation metadata.
 
+Synchronous business rejection and pending-reference resolution converge on the same durable rejected-wager and `WagerTransactionRejected` event behavior, preserving the stable `failureCode`. Contract validation failures are not durable wager rejections: processing rolls back without committing a wager, ledger entry, completed Inbox record, or Outbox event. The canonical inventory and retry semantics are documented in [Durable wager rejection codes](README.md#durable-wager-rejection-codes).
+
 ## Canonical wagering idempotency
 
 Wagering idempotency is durable across HTTP retries, SQS redelivery, restarts, multiple instances, and cross-channel replay.

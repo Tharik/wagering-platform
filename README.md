@@ -268,6 +268,24 @@ The pending-reference TTL is five minutes. Expiry produces terminal `REJECTED` w
 
 The runtime actively writes `PENDING_REFERENCE`, `PROCESSED`, and `REJECTED`. `PENDING` and `FAILED` remain reserved compatibility states; deeper lifecycle semantics are documented in [ARCHITECTURE.md](ARCHITECTURE.md).
 
+### Durable wager rejection codes
+
+These failure codes represent durable, terminal `REJECTED` outcomes. Retrying the same transaction identity replays the persisted rejected result and its original result balance; correcting a logically invalid request or reference generally requires a new `externalTransactionId` and idempotency key. Some business conditions remain invalid even under a new identity, such as attempting a second successful reversal after the referenced transaction has already been reversed.
+
+| failureCode | Applies to | Terminal condition | Retry semantics |
+| --- | --- | --- | --- |
+| `INSUFFICIENT_FUNDS` | `BET` | The wallet lacks funds for the debit. | The same identity replays the rejection. After funding, submit a new logical transaction with a new identity. |
+| `REVERSAL_INSUFFICIENT_FUNDS` | `ROLLBACK` of a `WIN` or `REFUND` requiring a debit | The wallet lacks funds for the reversal debit. | The same identity replays the rejection. After funding, submit a new logical transaction with a new identity. |
+| `REFERENCE_MISMATCH` | Referenced `WIN`, `REFUND`, or `ROLLBACK` | The processed reference differs in provider, player, wallet, round, or currency context. | The same identity replays the rejection. A corrected reference requires a new logical transaction and identity. |
+| `REFERENCE_AMOUNT_MISMATCH` | `REFUND` or `ROLLBACK` | The amount differs from the referenced transaction. A referenced `WIN` intentionally need not equal the BET amount. | The same identity replays the rejection. A corrected amount requires a new logical transaction and identity. |
+| `INVALID_REFERENCE_KIND` | Referenced `WIN`, `REFUND`, or `ROLLBACK` | A `WIN` or `REFUND` does not reference a `BET`, or a `ROLLBACK` does not reference a `BET`, `WIN`, or `REFUND`. | The same identity replays the rejection. A corrected reference requires a new logical transaction and identity. |
+| `INVALID_REFERENCE` | Referenced `WIN`, `REFUND`, or `ROLLBACK` | Defensive stable fallback for an unmapped reference-validation error; known validation paths normally use a more specific code. | The same identity replays the rejection. A corrected request requires a new logical transaction and identity. |
+| `REFERENCE_TERMINAL_UNSUCCESSFUL` | Referenced `WIN`, `REFUND`, or `ROLLBACK` | The referenced wager is already `REJECTED` or reserved `FAILED`. | The same identity replays the rejection. Referencing a different eligible transaction requires a new logical transaction and identity. |
+| `ALREADY_REVERSED` | `REFUND` or `ROLLBACK` | Another successful reversal already references the transaction. | The same identity replays the rejection, and changing identity does not make a second successful reversal valid. |
+| `REFERENCE_EXPIRED` | Pending referenced `WIN`, `REFUND`, or `ROLLBACK` | The unresolved reference exceeded the pending-reference TTL. | The same identity remains rejected even if the reference arrives later. A genuinely new logical transaction and identity are required. |
+
+Contract validation errors are not durable rejection codes. Invalid wager kinds, invalid amounts (including an invalid `LOSS` amount), required or forbidden references, and malformed money or currency are rejected before durable wager persistence. HTTP returns a `4xx` response where applicable; SQS processing fails and its transaction rolls back. No wager, ledger entry, completed Inbox record, or Outbox event is committed.
+
 ### HTTP outcomes
 
 | Situation | HTTP behavior |
