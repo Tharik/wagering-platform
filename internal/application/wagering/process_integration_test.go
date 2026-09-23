@@ -9,6 +9,7 @@ import (
 
 	"github.com/Tharik/wagering-platform/internal/application/wallet"
 	"github.com/Tharik/wagering-platform/internal/domain"
+	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -418,6 +419,183 @@ func TestProcessedBetReplayDoesNotMoveMoneyAgain(t *testing.T) {
 			"expected exactly 1 debit, got %d",
 			debitCount,
 		)
+	}
+}
+
+func TestProcessedWagerReplaySurvivesApplicationRestart(t *testing.T) {
+	const databaseURL = "postgres://wagering:wagering@localhost:5432/wagering?sslmode=disable"
+
+	identity := uuid.NewString()
+	playerID := "player-restart-replay-" + identity
+	externalTransactionID := "external-restart-replay-" + identity
+	idempotencyKey := "idempotency-restart-replay-" + identity
+
+	var walletID string
+	var firstResult ProcessResult
+
+	func() {
+		firstCtx, firstCancel := context.WithTimeout(context.Background(), 15*time.Second)
+		defer firstCancel()
+
+		firstPool, err := pgxpool.New(firstCtx, databaseURL)
+		if err != nil {
+			t.Fatalf("connect first application pool: %v", err)
+		}
+		defer firstPool.Close()
+
+		cleanDatabase(t, firstCtx, firstPool)
+
+		createdWallet, err := wallet.NewService(firstPool).Create(
+			firstCtx,
+			wallet.CreateWalletCommand{
+				PlayerID:       playerID,
+				InitialBalance: domain.NewMoney(10000, domain.BRL),
+			},
+		)
+		if err != nil {
+			t.Fatalf("create wallet: %v", err)
+		}
+		walletID = createdWallet.WalletID
+
+		command := ProcessCommand{
+			IdempotencyKey: idempotencyKey,
+			Request: domain.WagerRequest{
+				ProviderID:            "provider-a",
+				ExternalTransactionID: externalTransactionID,
+				PlayerID:              playerID,
+				WalletID:              walletID,
+				RoundID:               "round-restart-replay",
+				GameID:                "game-restart-replay",
+				Kind:                  domain.WagerKindBet,
+				Amount:                domain.NewMoney(1000, domain.BRL),
+			},
+		}
+
+		firstResult, err = NewService(firstPool).Process(firstCtx, command)
+		if err != nil {
+			t.Fatalf("process wager before restart: %v", err)
+		}
+		if firstResult.State != domain.WagerStateProcessed {
+			t.Fatalf("expected first wager PROCESSED, got %s", firstResult.State)
+		}
+		if firstResult.IdempotentReplay {
+			t.Fatal("first processing must not be an idempotent replay")
+		}
+		if firstResult.Balance.Amount() != 9000 {
+			t.Fatalf("expected first result balance 9000, got %d", firstResult.Balance.Amount())
+		}
+
+		var ledgerCount int
+		if err := firstPool.QueryRow(
+			firstCtx,
+			`SELECT COUNT(*) FROM ledger_entries WHERE transaction_id = $1`,
+			firstResult.TransactionID,
+		).Scan(&ledgerCount); err != nil {
+			t.Fatalf("count first wager ledger entries: %v", err)
+		}
+		if ledgerCount != 1 {
+			t.Fatalf("expected one first wager ledger entry, got %d", ledgerCount)
+		}
+	}()
+
+	secondCtx, secondCancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer secondCancel()
+
+	secondPool, err := pgxpool.New(secondCtx, databaseURL)
+	if err != nil {
+		t.Fatalf("connect restarted application pool: %v", err)
+	}
+	defer secondPool.Close()
+
+	secondService := NewService(secondPool)
+	command := ProcessCommand{
+		IdempotencyKey: idempotencyKey,
+		Request: domain.WagerRequest{
+			ProviderID:            "provider-a",
+			ExternalTransactionID: externalTransactionID,
+			PlayerID:              playerID,
+			WalletID:              walletID,
+			RoundID:               "round-restart-replay",
+			GameID:                "game-restart-replay",
+			Kind:                  domain.WagerKindBet,
+			Amount:                domain.NewMoney(1000, domain.BRL),
+		},
+	}
+
+	var balanceBeforeReplay, versionBeforeReplay int64
+	if err := secondPool.QueryRow(
+		secondCtx,
+		`SELECT balance, version FROM wallets WHERE id = $1`,
+		walletID,
+	).Scan(&balanceBeforeReplay, &versionBeforeReplay); err != nil {
+		t.Fatalf("load wallet before replay: %v", err)
+	}
+
+	replay, err := secondService.Process(secondCtx, command)
+	if err != nil {
+		t.Fatalf("replay wager after restart: %v", err)
+	}
+	if !replay.IdempotentReplay {
+		t.Fatal("expected replay after restart to be idempotent")
+	}
+	if replay.TransactionID != firstResult.TransactionID {
+		t.Fatalf("expected original transaction %s, got %s", firstResult.TransactionID, replay.TransactionID)
+	}
+	if replay.State != domain.WagerStateProcessed {
+		t.Fatalf("expected replay state PROCESSED, got %s", replay.State)
+	}
+	if replay.Balance.Amount() != firstResult.Balance.Amount() {
+		t.Fatalf("expected persisted result balance %d, got %d", firstResult.Balance.Amount(), replay.Balance.Amount())
+	}
+
+	var balanceAfterReplay, versionAfterReplay int64
+	if err := secondPool.QueryRow(
+		secondCtx,
+		`SELECT balance, version FROM wallets WHERE id = $1`,
+		walletID,
+	).Scan(&balanceAfterReplay, &versionAfterReplay); err != nil {
+		t.Fatalf("load wallet after replay: %v", err)
+	}
+	if balanceBeforeReplay != 9000 || balanceAfterReplay != balanceBeforeReplay {
+		t.Fatalf("expected wallet balance to remain 9000, before=%d after=%d", balanceBeforeReplay, balanceAfterReplay)
+	}
+	if versionBeforeReplay != 2 || versionAfterReplay != versionBeforeReplay {
+		t.Fatalf("expected wallet version to remain 2, before=%d after=%d", versionBeforeReplay, versionAfterReplay)
+	}
+
+	var wagerCount, ledgerCount, processedEventCount, balanceEventCount int
+	if err := secondPool.QueryRow(
+		secondCtx,
+		`SELECT COUNT(*) FROM wager_transactions WHERE provider_id = $1 AND external_transaction_id = $2 AND idempotency_key = $3`,
+		"provider-a",
+		externalTransactionID,
+		idempotencyKey,
+	).Scan(&wagerCount); err != nil {
+		t.Fatalf("count persisted wagers: %v", err)
+	}
+	if err := secondPool.QueryRow(
+		secondCtx,
+		`SELECT COUNT(*) FROM ledger_entries WHERE transaction_id = $1`,
+		firstResult.TransactionID,
+	).Scan(&ledgerCount); err != nil {
+		t.Fatalf("count persisted ledger entries: %v", err)
+	}
+	if err := secondPool.QueryRow(
+		secondCtx,
+		`SELECT COUNT(*) FILTER (WHERE event_type = 'WagerTransactionProcessed'), COUNT(*) FILTER (WHERE event_type = 'WalletBalanceChanged') FROM outbox_events WHERE aggregate_id = $1`,
+		firstResult.TransactionID,
+	).Scan(&processedEventCount, &balanceEventCount); err != nil {
+		t.Fatalf("count persisted outbox events: %v", err)
+	}
+
+	if wagerCount != 1 {
+		t.Fatalf("expected one persisted wager, got %d", wagerCount)
+	}
+	if ledgerCount != 1 {
+		t.Fatalf("expected one persisted wager ledger entry, got %d", ledgerCount)
+	}
+	if processedEventCount != 1 || balanceEventCount != 1 {
+		t.Fatalf("expected one processed and one balance event, got processed=%d balance=%d", processedEventCount, balanceEventCount)
 	}
 }
 
