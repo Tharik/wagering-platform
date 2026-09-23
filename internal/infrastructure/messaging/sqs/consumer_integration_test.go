@@ -671,6 +671,30 @@ func TestConsumerRetriesInvalidMessageAndMovesItToDLQ(t *testing.T) {
 	queues := createIsolatedCommandsQueueWithDLQ(t, ctx, realClient)
 	commandsQueueURL := queues.commandsURL
 	commandsDLQURL := queues.dlqURL
+	queueAttributes, err := realClient.GetQueueAttributes(ctx, &awssqs.GetQueueAttributesInput{
+		QueueUrl: aws.String(commandsQueueURL),
+		AttributeNames: []awstypes.QueueAttributeName{
+			awstypes.QueueAttributeNameVisibilityTimeout,
+			awstypes.QueueAttributeNameReceiveMessageWaitTimeSeconds,
+			awstypes.QueueAttributeNameRedrivePolicy,
+		},
+	})
+	if err != nil {
+		t.Fatalf("get source queue attributes: %v", err)
+	}
+	if queueAttributes.Attributes[string(awstypes.QueueAttributeNameVisibilityTimeout)] != "60" {
+		t.Fatalf("expected 60-second visibility timeout, got %q", queueAttributes.Attributes[string(awstypes.QueueAttributeNameVisibilityTimeout)])
+	}
+	if queueAttributes.Attributes[string(awstypes.QueueAttributeNameReceiveMessageWaitTimeSeconds)] != "10" {
+		t.Fatalf("expected 10-second receive wait, got %q", queueAttributes.Attributes[string(awstypes.QueueAttributeNameReceiveMessageWaitTimeSeconds)])
+	}
+	var redrivePolicy map[string]string
+	if err := json.Unmarshal([]byte(queueAttributes.Attributes[string(awstypes.QueueAttributeNameRedrivePolicy)]), &redrivePolicy); err != nil {
+		t.Fatalf("decode redrive policy: %v", err)
+	}
+	if redrivePolicy["maxReceiveCount"] != "3" {
+		t.Fatalf("expected maxReceiveCount 3, got %q", redrivePolicy["maxReceiveCount"])
+	}
 	walletService := wallet.NewService(pool)
 	createdWallet, err := walletService.Create(
 		ctx,
@@ -729,9 +753,8 @@ func TestConsumerRetriesInvalidMessageAndMovesItToDLQ(t *testing.T) {
 	}
 	// The source queue has maxReceiveCount=3.
 	//
-	// Each attempt must fail. Since a failed message is not deleted,
-	// we explicitly reset its visibility to zero so the test does not
-	// wait for the 30-second visibility timeout.
+	// Each attempt must fail. The consumer schedules the production retry
+	// delay; the test resets visibility to zero only to avoid waiting for it.
 	for attempt := 1; attempt <= 3; attempt++ {
 		client.lastReceivedMessage = nil
 		for {
@@ -972,7 +995,7 @@ func createIsolatedCommandsQueue(t *testing.T, ctx context.Context, client *awss
 	t.Helper()
 	result, err := client.CreateQueue(ctx, &awssqs.CreateQueueInput{
 		QueueName:  aws.String("consumer-test-" + uuid.NewString() + ".fifo"),
-		Attributes: map[string]string{"FifoQueue": "true", "ContentBasedDeduplication": "false", "VisibilityTimeout": "30"},
+		Attributes: map[string]string{"FifoQueue": "true", "ContentBasedDeduplication": "false", "VisibilityTimeout": "60", "ReceiveMessageWaitTimeSeconds": "10"},
 	})
 	if err != nil {
 		t.Fatalf("create isolated commands queue: %v", err)
@@ -988,7 +1011,7 @@ func createIsolatedCommandsQueueWithDLQ(t *testing.T, ctx context.Context, clien
 	t.Helper()
 	dlqResult, err := client.CreateQueue(ctx, &awssqs.CreateQueueInput{
 		QueueName:  aws.String("consumer-dlq-" + uuid.NewString() + ".fifo"),
-		Attributes: map[string]string{"FifoQueue": "true", "ContentBasedDeduplication": "false", "VisibilityTimeout": "30"},
+		Attributes: map[string]string{"FifoQueue": "true", "ContentBasedDeduplication": "false", "VisibilityTimeout": "60"},
 	})
 	if err != nil {
 		t.Fatalf("create isolated DLQ: %v", err)
@@ -1013,7 +1036,7 @@ func createIsolatedCommandsQueueWithDLQ(t *testing.T, ctx context.Context, clien
 	}
 	commandsResult, err := client.CreateQueue(ctx, &awssqs.CreateQueueInput{
 		QueueName:  aws.String("consumer-source-" + uuid.NewString() + ".fifo"),
-		Attributes: map[string]string{"FifoQueue": "true", "ContentBasedDeduplication": "false", "VisibilityTimeout": "30", "RedrivePolicy": string(redrivePolicy)},
+		Attributes: map[string]string{"FifoQueue": "true", "ContentBasedDeduplication": "false", "VisibilityTimeout": "60", "ReceiveMessageWaitTimeSeconds": "10", "RedrivePolicy": string(redrivePolicy)},
 	})
 	if err != nil {
 		t.Fatalf("create isolated commands queue with DLQ: %v", err)

@@ -30,6 +30,9 @@ import (
 const (
 	defaultConsumerName           = "wager-transactions"
 	wagerTransactionRequestedType = "WagerTransactionRequested"
+	consumerMaxMessages           = int32(1)
+	consumerWaitTimeSeconds       = int32(10)
+	maxRetryVisibilitySeconds     = int32(60)
 )
 
 type ConsumerClient interface {
@@ -52,6 +55,16 @@ type ConsumerClient interface {
 		optFns ...func(*awssqs.Options),
 
 	) (*awssqs.DeleteMessageOutput, error)
+
+	ChangeMessageVisibility(
+
+		ctx context.Context,
+
+		params *awssqs.ChangeMessageVisibilityInput,
+
+		optFns ...func(*awssqs.Options),
+
+	) (*awssqs.ChangeMessageVisibilityOutput, error)
 }
 
 type MessageProcessor interface {
@@ -198,9 +211,9 @@ func (c *Consumer) ConsumeOnce(ctx context.Context) (int, error) {
 
 			QueueUrl: aws.String(c.queueURL),
 
-			MaxNumberOfMessages: 10,
+			MaxNumberOfMessages: consumerMaxMessages,
 
-			WaitTimeSeconds: 10,
+			WaitTimeSeconds: consumerWaitTimeSeconds,
 
 			MessageSystemAttributeNames: []awstypes.MessageSystemAttributeName{
 
@@ -227,6 +240,9 @@ func (c *Consumer) ConsumeOnce(ctx context.Context) (int, error) {
 		c.recordRetry(message)
 
 		if err := c.processMessage(ctx, message); err != nil {
+			if ctx.Err() == nil {
+				c.scheduleRetry(ctx, message, err)
+			}
 
 			return processed, err
 
@@ -240,26 +256,98 @@ func (c *Consumer) ConsumeOnce(ctx context.Context) (int, error) {
 
 }
 
-func (c *Consumer) recordRetry(message awstypes.Message) {
+func (c *Consumer) scheduleRetry(
+	ctx context.Context,
+	message awstypes.Message,
+	processingErr error,
+) {
+	receiveCount := approximateReceiveCount(message)
+	retrySeconds := retryVisibility(receiveCount)
+	messageID := messageIdentifier(message)
 
-	rawReceiveCount, ok := message.Attributes[string(
+	attrs := []any{
+		slog.String("messageId", messageID),
+		slog.Int("receiveCount", receiveCount),
+		slog.Int("retryVisibilitySeconds", int(retrySeconds)),
+		slog.Any("error", processingErr),
+	}
 
+	if message.ReceiptHandle == nil {
+		c.logger.Error(
+			"cannot schedule SQS command retry without receipt handle",
+			attrs...,
+		)
+		return
+	}
+
+	_, err := c.client.ChangeMessageVisibility(
+		ctx,
+		&awssqs.ChangeMessageVisibilityInput{
+			QueueUrl:          aws.String(c.queueURL),
+			ReceiptHandle:     message.ReceiptHandle,
+			VisibilityTimeout: retrySeconds,
+		},
+	)
+	if err != nil {
+		attrs = append(
+			attrs,
+			slog.Any("visibilityChangeError", err),
+		)
+		c.logger.Error("failed to schedule SQS command retry", attrs...)
+		return
+	}
+
+	c.logger.Warn("SQS command retry scheduled", attrs...)
+}
+
+func retryVisibility(receiveCount int) int32 {
+	if receiveCount < 1 {
+		receiveCount = 1
+	}
+
+	delay := int32(5)
+	for attempt := 1; attempt < receiveCount && delay < maxRetryVisibilitySeconds; attempt++ {
+		delay *= 2
+	}
+
+	if delay > maxRetryVisibilitySeconds {
+		return maxRetryVisibilitySeconds
+	}
+
+	return delay
+}
+
+func approximateReceiveCount(message awstypes.Message) int {
+	rawReceiveCount := message.Attributes[string(
 		awstypes.MessageSystemAttributeNameApproximateReceiveCount,
 	)]
-
-	if !ok {
-
-		return
-
-	}
-
 	receiveCount, err := strconv.Atoi(rawReceiveCount)
-
-	if err != nil {
-
-		return
-
+	if err != nil || receiveCount < 1 {
+		return 1
 	}
+
+	return receiveCount
+}
+
+func messageIdentifier(message awstypes.Message) string {
+	if message.Body != nil {
+		var envelope struct {
+			MessageID string `json:"messageId"`
+		}
+		if json.Unmarshal([]byte(*message.Body), &envelope) == nil && envelope.MessageID != "" {
+			return envelope.MessageID
+		}
+	}
+
+	if message.MessageId != nil {
+		return *message.MessageId
+	}
+
+	return "unknown"
+}
+
+func (c *Consumer) recordRetry(message awstypes.Message) {
+	receiveCount := approximateReceiveCount(message)
 
 	if receiveCount > 1 {
 
