@@ -292,6 +292,19 @@ The primary queues are:
 
 The local bootstrap also provisions `wager-events-dlq.fifo`; the application does not currently monitor or consume it.
 
+With the Compose stack running, inspect the primary queues without receiving, deleting, or changing message visibility:
+
+```bash
+docker compose exec localstack awslocal sqs get-queue-url --queue-name wager-transactions.fifo
+docker compose exec localstack awslocal sqs get-queue-attributes --queue-url http://localhost:4566/000000000000/wager-transactions.fifo --attribute-names ApproximateNumberOfMessages ApproximateNumberOfMessagesNotVisible
+
+docker compose exec localstack awslocal sqs get-queue-url --queue-name wager-transactions-dlq.fifo
+docker compose exec localstack awslocal sqs get-queue-attributes --queue-url http://localhost:4566/000000000000/wager-transactions-dlq.fifo --attribute-names ApproximateNumberOfMessages ApproximateNumberOfMessagesNotVisible
+
+docker compose exec localstack awslocal sqs get-queue-url --queue-name wager-events.fifo
+docker compose exec localstack awslocal sqs get-queue-attributes --queue-url http://localhost:4566/000000000000/wager-events.fifo --attribute-names ApproximateNumberOfMessages ApproximateNumberOfMessagesNotVisible
+```
+
 Official inbound command shape:
 
 ```json
@@ -368,6 +381,54 @@ git diff --check
 
 The normal suite covers financial concurrency, idempotency races, provider isolation, HTTP/SQS cross-channel identity, Inbox/Outbox recovery, SQS retry/redrive, pending references, reconciliation, migrations, and graceful shutdown. The dedicated harness below provides real process-level three-instance verification.
 
+### Focused correctness verification
+
+Run these commands from the repository root. The integration-test commands assume the Compose stack is already running.
+
+```bash
+# Money parsing, formatting, arithmetic, and wallet numeric boundaries.
+go test ./internal/domain -run 'Test(ParseMoney|Money(Add|Subtract|String)|Wallet(Credit|Debit))' -count=1
+
+# Canonical payload hashing and persistent idempotency behavior.
+go test ./internal/domain -run 'Test(PayloadHash|FixedDecimalMoney|InvalidMoney)' -count=1
+go test ./internal/application/wagering -run 'Test(ProcessedBetReplay|SameIdempotencyKey|SameBetFiftyTimes)' -count=1
+
+# Pending-reference resolution, expiry, and restart recovery.
+go test ./internal/application/wagering -run 'Test(MissingReference|PendingRollback|PendingReference)' -count=1
+
+# Durable Inbox registration, replay, and conflicts.
+go test ./internal/infrastructure/messaging/inbox -count=1
+
+# Outbox retry, stable event IDs, and concurrent publisher coordination.
+go test ./internal/infrastructure/messaging/outbox -run 'Test(PublishBatch|ConcurrentPublishers|PendingEvent)' -count=1
+
+# SQS processing, visibility retry, and DLQ redrive.
+go test ./internal/infrastructure/messaging/sqs -run 'TestConsumer' -count=1
+
+# OIDC validation and provider authorization edge cases.
+go test ./internal/infrastructure/httpapi -run 'Test(AuthMiddlewareValidatesOIDCEdgeCases|OIDCAuthenticationAndProviderIsolation)' -count=1
+
+# Reconciliation consistency, divergence, and snapshot behavior.
+go test ./internal/application/wallet -run 'TestReconcil' -count=1
+
+# Three-process concurrency and idempotency harness.
+./scripts/multi-instance-test.sh
+```
+
+Proof mapping:
+
+| Behavior | Verification path |
+| --- | --- |
+| Money and canonical payload boundaries | Focused domain tests above |
+| Persistent idempotency | Focused wagering integration tests above |
+| Pending-reference lifecycle and recovery | Focused wagering integration tests above |
+| Inbox replay/conflict handling | Inbox integration package above |
+| Outbox retry and multi-publisher coordination | Focused Outbox integration tests above |
+| SQS visibility retry and redrive | Focused SQS integration tests above |
+| Authentication and provider isolation | Focused HTTP authentication tests above |
+| Snapshot-consistent reconciliation | Focused wallet integration tests above |
+| Multi-process financial concurrency | `./scripts/multi-instance-test.sh` |
+
 ## Multi-instance verification
 
 Run the supported harness:
@@ -376,7 +437,7 @@ Run the supported harness:
 ./scripts/multi-instance-test.sh
 ```
 
-It starts three independent application containers and repeats the process-level checks three times. The harness verifies two concurrent `80.00` BETs against a `100.00` wallet, cross-instance idempotency, independent-wallet processing, and direct database invariants. It leaves the Compose stack running for inspection.
+Run it from the repository root. It starts three independent application containers and repeats the process-level checks three times. The harness verifies two concurrent `80.00` BETs against a `100.00` wallet, cross-instance idempotency, independent-wallet processing, and direct database invariants. It intentionally leaves the Compose stack running for inspection.
 
 ## Failure and recovery
 
