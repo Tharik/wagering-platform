@@ -124,6 +124,17 @@ func (h *WalletHandler) Create(
 			InitialBalance: initialBalance,
 		},
 	)
+	if errors.Is(err, wallet.ErrWalletAlreadyExists) {
+		writeJSON(
+			w,
+			http.StatusConflict,
+			map[string]string{
+				"error": "wallet already exists",
+			},
+		)
+		return
+	}
+
 	if err != nil {
 		writeJSON(
 			w,

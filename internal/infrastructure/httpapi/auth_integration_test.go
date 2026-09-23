@@ -301,6 +301,42 @@ func TestOIDCAuthenticationAndProviderIsolation(t *testing.T) {
 		walletID = result.ID
 	})
 
+	t.Run("duplicate wallet returns conflict", func(t *testing.T) {
+		response := doRequest(
+			t,
+			ctx,
+			http.MethodPost,
+			testServer.URL+"/wallets",
+			internalToken,
+			map[string]any{
+				"playerId": "player-auth-integration",
+				"initialBalance": map[string]any{
+					"amount":   "100.00",
+					"currency": "BRL",
+				},
+			},
+		)
+		defer response.Body.Close()
+
+		if response.StatusCode != http.StatusConflict {
+			t.Fatalf("expected 409, got %d: %s", response.StatusCode, readBody(t, response))
+		}
+
+		var result map[string]string
+		decodeJSON(t, response, &result)
+		if result["error"] != "wallet already exists" {
+			t.Fatalf("expected wallet already exists error, got %q", result["error"])
+		}
+
+		var count int
+		if err := pool.QueryRow(ctx, `SELECT COUNT(*) FROM wallets WHERE player_id = $1 AND currency = 'BRL'`, "player-auth-integration").Scan(&count); err != nil {
+			t.Fatalf("count duplicate wallets: %v", err)
+		}
+		if count != 1 {
+			t.Fatalf("expected one wallet row, got %d", count)
+		}
+	})
+
 	t.Run("internal client reads aligned wallet resource", func(t *testing.T) {
 		response := doRequest(
 			t,

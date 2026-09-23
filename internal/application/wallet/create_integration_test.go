@@ -3,6 +3,8 @@ package wallet
 import (
 	"context"
 	"encoding/json"
+	"errors"
+	"sync"
 	"testing"
 	"time"
 
@@ -398,6 +400,92 @@ func TestCreateZeroBalanceWalletDoesNotCreateOpeningMovement(t *testing.T) {
 	assertCount(t, ctx, pool, "wager_transactions", 0)
 	assertCount(t, ctx, pool, "ledger_entries", 0)
 	assertCount(t, ctx, pool, "outbox_events", 0)
+}
+
+func TestConcurrentDuplicateWalletCreationUsesUniqueConstraint(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	pool, err := pgxpool.New(ctx, "postgres://wagering:wagering@localhost:5432/wagering?sslmode=disable")
+	if err != nil {
+		t.Fatalf("connect postgres: %v", err)
+	}
+	defer pool.Close()
+	cleanDatabase(t, ctx, pool)
+
+	const attempts = 8
+	service := NewService(pool)
+	start := make(chan struct{})
+	results := make(chan error, attempts)
+	var ready sync.WaitGroup
+	ready.Add(attempts)
+
+	for i := 0; i < attempts; i++ {
+		go func() {
+			ready.Done()
+			<-start
+			_, createErr := service.Create(ctx, CreateWalletCommand{
+				PlayerID:       "player-concurrent-duplicate",
+				InitialBalance: domain.Zero(domain.BRL),
+			})
+			results <- createErr
+		}()
+	}
+
+	ready.Wait()
+	close(start)
+
+	successes := 0
+	for i := 0; i < attempts; i++ {
+		createErr := <-results
+		if createErr == nil {
+			successes++
+			continue
+		}
+		if !errors.Is(createErr, ErrWalletAlreadyExists) {
+			t.Fatalf("expected ErrWalletAlreadyExists, got %v", createErr)
+		}
+	}
+	if successes != 1 {
+		t.Fatalf("expected exactly one successful create, got %d", successes)
+	}
+
+	var count int
+	if err := pool.QueryRow(ctx, `SELECT COUNT(*) FROM wallets WHERE player_id = $1 AND currency = $2`, "player-concurrent-duplicate", string(domain.BRL)).Scan(&count); err != nil {
+		t.Fatalf("count wallets: %v", err)
+	}
+	if count != 1 {
+		t.Fatalf("expected exactly one wallet row, got %d", count)
+	}
+}
+
+func TestSamePlayerDifferentCurrencyIsNotDuplicate(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	pool, err := pgxpool.New(ctx, "postgres://wagering:wagering@localhost:5432/wagering?sslmode=disable")
+	if err != nil {
+		t.Fatalf("connect postgres: %v", err)
+	}
+	defer pool.Close()
+	cleanDatabase(t, ctx, pool)
+
+	service := NewService(pool)
+	for _, currency := range []domain.Currency{domain.BRL, domain.Currency("USD")} {
+		if _, err := service.Create(ctx, CreateWalletCommand{
+			PlayerID:       "player-multiple-currencies",
+			InitialBalance: domain.Zero(currency),
+		}); err != nil {
+			t.Fatalf("create %s wallet: %v", currency, err)
+		}
+	}
+
+	var count int
+	if err := pool.QueryRow(ctx, `SELECT COUNT(*) FROM wallets WHERE player_id = $1`, "player-multiple-currencies").Scan(&count); err != nil {
+		t.Fatalf("count player wallets: %v", err)
+	}
+	if count != 2 {
+		t.Fatalf("expected one wallet per currency, got %d", count)
+	}
 }
 
 func cleanDatabase(

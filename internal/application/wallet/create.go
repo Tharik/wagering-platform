@@ -3,6 +3,7 @@ package wallet
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -12,8 +13,13 @@ import (
 	"github.com/Tharik/wagering-platform/internal/observability"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
+
+var ErrWalletAlreadyExists = errors.New("wallet already exists")
+
+const walletPlayerCurrencyUniqueConstraint = "wallets_player_currency_unique"
 
 type CreateWalletCommand struct {
 	PlayerID       string
@@ -106,6 +112,13 @@ func (s *Service) Create(
 		now,
 	)
 	if err != nil {
+		var pgErr *pgconn.PgError
+		if errors.As(err, &pgErr) &&
+			pgErr.Code == "23505" &&
+			pgErr.ConstraintName == walletPlayerCurrencyUniqueConstraint {
+			return CreateWalletResult{}, ErrWalletAlreadyExists
+		}
+
 		return CreateWalletResult{}, fmt.Errorf("insert wallet: %w", err)
 	}
 
