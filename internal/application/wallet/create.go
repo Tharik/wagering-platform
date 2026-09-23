@@ -237,28 +237,25 @@ func createOpeningTransaction(
 		return fmt.Errorf("insert opening ledger entry: %w", err)
 	}
 
-	if err := insertOutboxEvent(
-		ctx,
-		tx,
+	if err := insertOutboxEvent(ctx, tx, eventpayload.NewWagerTransactionProcessedEvent(
 		walletID,
-		"WagerTransactionProcessed",
 		correlationID,
+		"",
+		now,
 		eventpayload.WagerTransactionProcessedData{
 			TransactionID: transactionID.String(),
 			WalletID:      walletID.String(),
 			Kind:          "OPENING",
 		},
-		now,
-	); err != nil {
+	)); err != nil {
 		return err
 	}
 
-	if err := insertOutboxEvent(
-		ctx,
-		tx,
+	if err := insertOutboxEvent(ctx, tx, eventpayload.NewWalletBalanceChangedEvent(
 		walletID,
-		"WalletBalanceChanged",
 		correlationID,
+		"",
+		now,
 		eventpayload.WalletBalanceChangedData{
 			WalletID:      walletID.String(),
 			TransactionID: transactionID.String(),
@@ -268,8 +265,7 @@ func createOpeningTransaction(
 			BalanceAfter:  eventpayload.NewMoney(initialBalance),
 			WalletVersion: 1,
 		},
-		now,
-	); err != nil {
+	)); err != nil {
 		return err
 	}
 
@@ -279,25 +275,9 @@ func createOpeningTransaction(
 func insertOutboxEvent(
 	ctx context.Context,
 	tx pgx.Tx,
-	aggregateID uuid.UUID,
-	eventType string,
-	correlationID string,
-	data any,
-	now time.Time,
+	event eventpayload.Event,
 ) error {
-	eventID := uuid.New()
-
-	envelope := map[string]any{
-		"eventId":       eventID.String(),
-		"eventType":     eventType,
-		"aggregateId":   aggregateID.String(),
-		"correlationId": correlationID,
-		"occurredAt":    now.Format(time.RFC3339Nano),
-		"version":       1,
-		"data":          data,
-	}
-
-	payload, err := json.Marshal(envelope)
+	payload, err := json.Marshal(event)
 	if err != nil {
 		return fmt.Errorf("marshal outbox event: %w", err)
 	}
@@ -316,11 +296,11 @@ func insertOutboxEvent(
 		)
 		VALUES ($1, $2, $3, $4::jsonb, $5, 0, $5)
 		`,
-		eventID,
-		aggregateID,
-		eventType,
+		event.ID(),
+		event.AggregateID(),
+		event.Type(),
 		payload,
-		now,
+		event.OccurredAt(),
 	)
 	if err != nil {
 		return fmt.Errorf("insert outbox event: %w", err)

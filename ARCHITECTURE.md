@@ -336,7 +336,7 @@ Shutdown first gives the SQS consumer its Fx shutdown context, then cancels the 
 - **Receive/acceptance context:** cancellation stops long polling and prevents newly received work from beginning processing.
 - **Processing context:** already-started work receives a drain opportunity independent of receive cancellation.
 
-The drain budget is ten seconds or the earlier Fx shutdown deadline. Successful context-aware processing during drain may commit and delete its message. Failed or canceled drain processing does not delete the message or change its visibility after shutdown cancellation; normal runtime failures retain visibility-backoff behavior.
+The drain budget is ten seconds or the earlier Fx shutdown deadline. Successful context-aware processing during drain may commit and delete its message. Failed or canceled drain processing does not delete the message. After processing has returned, shutdown handling releases its visibility to zero for safe redelivery; normal runtime failures retain visibility-backoff behavior. A delete failure after durable processing does not trigger visibility release.
 
 At the drain deadline the worker cancels the processing context. Production PostgreSQL and AWS operations observe cancellation and are expected to return promptly. Go cannot forcibly terminate an arbitrary synchronous function that ignores context.
 

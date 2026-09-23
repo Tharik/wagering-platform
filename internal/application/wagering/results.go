@@ -120,16 +120,17 @@ func insertProcessedEvents(
 	if err := insertOutboxEvent(
 		ctx,
 		tx,
-		transactionID,
-		"WagerTransactionProcessed",
-		correlationID,
-		causationID,
-		eventpayload.WagerTransactionProcessedData{
-			TransactionID: transactionID.String(),
-			WalletID:      wallet.ID,
-			Kind:          string(kind),
-		},
-		now,
+		eventpayload.NewWagerTransactionProcessedEvent(
+			transactionID,
+			correlationID,
+			causationID,
+			now,
+			eventpayload.WagerTransactionProcessedData{
+				TransactionID: transactionID.String(),
+				WalletID:      wallet.ID,
+				Kind:          string(kind),
+			},
+		),
 	); err != nil {
 		return err
 	}
@@ -142,20 +143,21 @@ func insertProcessedEvents(
 	if err := insertOutboxEvent(
 		ctx,
 		tx,
-		transactionID,
-		"WalletBalanceChanged",
-		correlationID,
-		causationID,
-		eventpayload.WalletBalanceChangedData{
-			WalletID:      wallet.ID,
-			TransactionID: transactionID.String(),
-			Direction:     direction,
-			Money:         eventpayload.NewMoney(amount),
-			BalanceBefore: eventpayload.NewMoney(balanceBefore),
-			BalanceAfter:  eventpayload.NewMoney(wallet.Balance),
-			WalletVersion: wallet.Version,
-		},
-		now,
+		eventpayload.NewWalletBalanceChangedEvent(
+			transactionID,
+			correlationID,
+			causationID,
+			now,
+			eventpayload.WalletBalanceChangedData{
+				WalletID:      wallet.ID,
+				TransactionID: transactionID.String(),
+				Direction:     direction,
+				Money:         eventpayload.NewMoney(amount),
+				BalanceBefore: eventpayload.NewMoney(balanceBefore),
+				BalanceAfter:  eventpayload.NewMoney(wallet.Balance),
+				WalletVersion: wallet.Version,
+			},
+		),
 	); err != nil {
 		return err
 	}
@@ -178,48 +180,28 @@ func insertRejectedEvent(
 	return insertOutboxEvent(
 		ctx,
 		tx,
-		transactionID,
-		"WagerTransactionRejected",
-		correlationID,
-		causationID,
-		eventpayload.WagerTransactionRejectedData{
-			TransactionID: transactionID.String(),
-			WalletID:      walletID,
-			ProviderID:    providerID,
-			Kind:          string(kind),
-			FailureCode:   failureCode,
-		},
-		now,
+		eventpayload.NewWagerTransactionRejectedEvent(
+			transactionID,
+			correlationID,
+			causationID,
+			now,
+			eventpayload.WagerTransactionRejectedData{
+				TransactionID: transactionID.String(),
+				WalletID:      walletID,
+				ProviderID:    providerID,
+				Kind:          string(kind),
+				FailureCode:   failureCode,
+			},
+		),
 	)
 }
 
 func insertOutboxEvent(
 	ctx context.Context,
 	tx pgx.Tx,
-	aggregateID uuid.UUID,
-	eventType string,
-	correlationID string,
-	causationID string,
-	data any,
-	now time.Time,
+	event eventpayload.Event,
 ) error {
-	eventID := uuid.New()
-
-	envelope := map[string]any{
-		"eventId":       eventID.String(),
-		"eventType":     eventType,
-		"aggregateId":   aggregateID.String(),
-		"correlationId": correlationID,
-		"occurredAt":    now.Format(time.RFC3339Nano),
-		"version":       1,
-		"data":          data,
-	}
-
-	if causationID != "" {
-		envelope["causationId"] = causationID
-	}
-
-	payload, err := json.Marshal(envelope)
+	payload, err := json.Marshal(event)
 	if err != nil {
 		return fmt.Errorf("marshal outbox event: %w", err)
 	}
@@ -238,11 +220,11 @@ func insertOutboxEvent(
 		)
 		VALUES ($1, $2, $3, $4::jsonb, $5, 0, $5)
 		`,
-		eventID,
-		aggregateID,
-		eventType,
+		event.ID(),
+		event.AggregateID(),
+		event.Type(),
 		payload,
-		now,
+		event.OccurredAt(),
 	)
 	if err != nil {
 		return fmt.Errorf("insert outbox event: %w", err)

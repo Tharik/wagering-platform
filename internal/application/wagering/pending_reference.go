@@ -126,12 +126,13 @@ func insertPendingReferenceEvent(
 	if err := insertOutboxEvent(
 		ctx,
 		tx,
-		transactionID,
-		"WagerTransactionPendingReference",
-		cmd.CorrelationID,
-		cmd.CausationID,
-		payload,
-		now,
+		eventpayload.NewWagerTransactionPendingReferenceEvent(
+			transactionID,
+			cmd.CorrelationID,
+			cmd.CausationID,
+			now,
+			payload,
+		),
 	); err != nil {
 		return fmt.Errorf(
 			"insert pending reference outbox event: %w",
