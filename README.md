@@ -43,20 +43,22 @@ The implementation provides:
 
 ## Requirements
 
-For local development:
-
-- Go
-- Docker
-- Docker Compose
-- PostgreSQL client (`psql`) is optional; migrations can also be executed through the PostgreSQL container.
+For local development, Docker and Docker Compose are sufficient to run the
+application stack. A local Go installation is only needed for running Go
+commands directly on the host. PostgreSQL client (`psql`) is optional because
+migrations can be executed through the PostgreSQL container.
 
 ## Local infrastructure
 
-Start PostgreSQL, LocalStack, and Keycloak:
+Build and start PostgreSQL, LocalStack, Keycloak, and the application:
 
 ```bash
-docker compose up -d
+docker compose up --build
 ```
+
+Until migration startup is automated, a fresh database must be migrated with
+the command in the Database migrations section. After applying migrations,
+restart the application service with `docker compose restart app`.
 
 Check the services:
 
@@ -110,6 +112,7 @@ SQS_COMMANDS_QUEUE_URL
 SQS_COMMANDS_DLQ_URL
 SQS_EVENTS_QUEUE_URL
 OIDC_ISSUER
+OIDC_JWKS_URL
 HTTP_ADDRESS
 ```
 
@@ -154,7 +157,8 @@ After reverting all migrations, they can be applied again using the UP command a
 
 ## Running the application
 
-After the infrastructure is running and migrations have been applied:
+To run the application directly on the host after the infrastructure is
+running and migrations have been applied:
 
 ```bash
 go run ./cmd/wagering-api

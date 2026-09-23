@@ -44,6 +44,7 @@ type config struct {
 	CommandsDLQURL   string
 	EventsQueueURL   string
 	OIDCIssuer       string
+	OIDCJWKSURL      string
 	HTTPAddress      string
 }
 
@@ -115,6 +116,7 @@ func loadConfig() config {
 			"OIDC_ISSUER",
 			defaultOIDCIssuer,
 		),
+		OIDCJWKSURL: os.Getenv("OIDC_JWKS_URL"),
 		HTTPAddress: envOrDefault(
 			"HTTP_ADDRESS",
 			defaultHTTPAddress,
@@ -186,6 +188,14 @@ func newPool(
 func newAuthMiddleware(
 	cfg config,
 ) (*httpapi.AuthMiddleware, error) {
+	if cfg.OIDCJWKSURL != "" {
+		return httpapi.NewAuthMiddlewareWithJWKSURL(
+			context.Background(),
+			cfg.OIDCIssuer,
+			cfg.OIDCJWKSURL,
+		)
+	}
+
 	return httpapi.NewAuthMiddleware(
 		context.Background(),
 		cfg.OIDCIssuer,

@@ -49,6 +49,25 @@ func NewAuthMiddleware(
 	}, nil
 }
 
+func NewAuthMiddlewareWithJWKSURL(
+	ctx context.Context,
+	issuer string,
+	jwksURL string,
+) (*AuthMiddleware, error) {
+	keySet := oidc.NewRemoteKeySet(ctx, jwksURL)
+	verifier := oidc.NewVerifier(
+		issuer,
+		keySet,
+		&oidc.Config{
+			ClientID: wageringAPIAudience,
+		},
+	)
+
+	return &AuthMiddleware{
+		verifier: verifier,
+	}, nil
+}
+
 func (m *AuthMiddleware) Authenticate(
 	next http.Handler,
 ) http.Handler {

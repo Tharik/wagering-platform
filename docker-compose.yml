@@ -1,4 +1,36 @@
 services:
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    environment:
+      DATABASE_URL: postgres://wagering:wagering@postgres:5432/wagering?sslmode=disable
+      AWS_REGION: us-east-1
+      AWS_ACCESS_KEY_ID: test
+      AWS_SECRET_ACCESS_KEY: test
+      SQS_ENDPOINT: http://localstack:4566
+      SQS_COMMANDS_QUEUE_URL: http://localstack:4566/000000000000/wager-transactions.fifo
+      SQS_COMMANDS_DLQ_URL: http://localstack:4566/000000000000/wager-transactions-dlq.fifo
+      SQS_EVENTS_QUEUE_URL: http://localstack:4566/000000000000/wager-events.fifo
+      OIDC_ISSUER: http://localhost:8081/realms/wagering
+      OIDC_JWKS_URL: http://keycloak:8080/realms/wagering/protocol/openid-connect/certs
+      HTTP_ADDRESS: :8080
+    ports:
+      - "8080:8080"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      localstack:
+        condition: service_healthy
+      keycloak:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:8080/health/ready"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+      start_period: 5s
+
   postgres:
     image: postgres:17-alpine
     environment:
@@ -28,7 +60,7 @@ services:
       test:
         [
           "CMD-SHELL",
-          "curl -fs http://localhost:4566/_localstack/health >/dev/null",
+          "awslocal sqs get-queue-url --queue-name wager-transactions.fifo >/dev/null && awslocal sqs get-queue-url --queue-name wager-transactions-dlq.fifo >/dev/null && awslocal sqs get-queue-url --queue-name wager-events.fifo >/dev/null",
         ]
       interval: 2s
       timeout: 5s
@@ -44,6 +76,7 @@ services:
     environment:
       KC_BOOTSTRAP_ADMIN_USERNAME: admin
       KC_BOOTSTRAP_ADMIN_PASSWORD: admin
+      KC_HOSTNAME: http://localhost:8081
     ports:
       - "8081:8080"
     volumes:
